@@ -1,0 +1,7 @@
+{
+  "name": "LingoLink",
+  "description": "一个沉浸式的英语学习聊天应用，提供双语切换、智能回复提示和自然对话流。专为护眼设计，适配移动端。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
