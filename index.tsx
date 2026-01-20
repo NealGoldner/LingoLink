@@ -21,10 +21,21 @@ interface Suggestion {
 
 type Difficulty = '入门' | '进阶' | '挑战';
 
+// Fix: Defining AIStudio interface to match existing global declarations and fixing Window interface property type
+declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
+
+  interface Window {
+    aistudio: AIStudio;
+  }
+}
+
 // --- 常量配置 ---
 const LIVE_MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TRANSLATION_MODEL_NAME = 'gemini-3-flash-preview';
-const NUDGE_DELAY = 5000; 
 
 // --- 辅助函数 ---
 function encode(bytes: Uint8Array) {
@@ -80,6 +91,8 @@ const App: React.FC = () => {
   const [isAISpeaking, setIsAISpeaking] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
+  const [statusText, setStatusText] = useState('等待开始');
+  const [errorText, setErrorText] = useState<React.ReactNode | null>(null);
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<any>(null);
@@ -92,14 +105,12 @@ const App: React.FC = () => {
   const currentOutputText = useRef('');
   const audioBufferQueue = useRef<Blob[]>([]);
 
-  // 自动滚动到最新消息
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
     }
   }, [messages]);
 
-  // 监听 AI 是否在说话状态
   useEffect(() => {
     const checkStatus = setInterval(() => {
       const active = sourcesRef.current.size > 0;
@@ -127,10 +138,9 @@ const App: React.FC = () => {
         model: TRANSLATION_MODEL_NAME,
         contents: `Translate this naturally to Chinese (informal/casual): "${text}". Keep the slang vibes if present.`,
       });
-      const translation = response.text?.trim() || "哎呀，翻译失败了。";
+      const translation = response.text?.trim() || "翻译暂时不可用。";
       setMessages(prev => prev.map(m => m.id === id ? { ...m, translation, isTranslating: false } : m));
     } catch (err) {
-      console.error("Translation error:", err);
       setMessages(prev => prev.map(m => m.id === id ? { ...m, isTranslating: false } : m));
     }
   };
@@ -145,30 +155,57 @@ const App: React.FC = () => {
       const response = await ai.models.generateContent({
         model: TRANSLATION_MODEL_NAME,
         contents: `Conversation Context:\n${context}\n\nDifficulty: ${difficulty}\n
-        Generate 3 high-quality response suggestions for an English learner in this EXACT JSON structure:
-        [
-          {"tag": "Flow", "label": "顺向接话", "en": "...", "cn": "..."},
-          {"tag": "Dive", "label": "深度追问", "en": "...", "cn": "..."},
-          {"tag": "Safety", "label": "紧急救场", "en": "...", "cn": "..."}
-        ]
-        RULES: Match the ${difficulty} level, use modern idiomatic English.`,
+        Generate 3 high-quality response suggestions in JSON format for an English learner. 
+        Structure: [{"tag": "Flow", "label": "顺向接话", "en": "...", "cn": "..."}, ...]`,
         config: { responseMimeType: "application/json" }
       });
       
       const text = response.text?.trim() || "[]";
       setSuggestions(JSON.parse(text));
     } catch (e) {
-      console.error("Suggestion generation failed", e);
+      console.error("Suggestion failed", e);
     } finally {
       setIsGeneratingSuggestions(false);
     }
   };
 
+  const checkApiKey = async () => {
+    if (process.env.API_KEY) return true;
+    const hasKey = await window.aistudio.hasSelectedApiKey();
+    if (!hasKey) {
+      await window.aistudio.openSelectKey();
+      return true; // 假设用户选择成功
+    }
+    return true;
+  };
+
   const startSession = async () => {
     if (isSessionActive || isConnecting) return;
+    setErrorText(null);
     setIsConnecting(true);
+    setStatusText('连接中...');
+
+    // 1. 安全环境检查
+    if (!window.isSecureContext) {
+      setErrorText('API 要求 HTTPS 环境。请检查您的域名是否已开启 SSL。');
+      setIsConnecting(false);
+      return;
+    }
+
+    // 2. 密钥检查
+    try {
+      await checkApiKey();
+    } catch (e) {
+      setErrorText('无法获取 API 密钥，请重试。');
+      setIsConnecting(false);
+      return;
+    }
 
     try {
+      setStatusText('开启麦克风...');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      setStatusText('握手 AI 引擎...');
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       if (!inputAudioCtxRef.current) inputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
@@ -177,14 +214,13 @@ const App: React.FC = () => {
       await inputAudioCtxRef.current.resume();
       await outputAudioCtxRef.current.resume();
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
       const sessionPromise = ai.live.connect({
         model: LIVE_MODEL_NAME,
         callbacks: {
           onopen: () => {
             setIsSessionActive(true);
             setIsConnecting(false);
+            setStatusText('通话中');
             const source = inputAudioCtxRef.current!.createMediaStreamSource(stream);
             const scriptProcessor = inputAudioCtxRef.current!.createScriptProcessor(4096, 1, 1);
             
@@ -208,7 +244,6 @@ const App: React.FC = () => {
                 source.disconnect(); 
               } 
             };
-            
             generateSuggestions();
           },
           onmessage: async (message: LiveServerMessage) => {
@@ -242,23 +277,42 @@ const App: React.FC = () => {
               currentInputText.current = ''; currentOutputText.current = '';
             }
           },
-          onerror: (err) => {
+          onerror: (err: any) => {
             console.error("Session Error:", err);
+            const msg = err.message || "";
+            if (msg.includes("Requested entity was not found")) {
+              setErrorText(
+                <div className="flex flex-col gap-2">
+                  <p>API 密钥无效或项目未开启计费。</p>
+                  <div className="flex gap-4">
+                    <button onClick={() => window.aistudio.openSelectKey()} className="underline font-bold">重新选择密钥</button>
+                    <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline opacity-70">查看计费文档</a>
+                  </div>
+                </div>
+              );
+            } else {
+              setErrorText('连接发生错误，请刷新页面。');
+            }
             setIsSessionActive(false);
           },
-          onclose: () => setIsSessionActive(false)
+          onclose: () => {
+            setIsSessionActive(false);
+            setStatusText('已断开');
+          }
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: "You are 'Vibe' - the world's most charismatic English tutor. Use modern slang and keep the energy high. Be supportive but fun.",
+          systemInstruction: "You are 'Vibe' - the world's most charismatic English tutor. Use modern slang.",
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
           inputAudioTranscription: {},
           outputAudioTranscription: {}
         }
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error("Start Session Error:", err);
+      setErrorText(err.message || '麦克风请求失败，请确保已授权。');
       setIsConnecting(false);
+      setStatusText('启动失败');
     }
   };
 
@@ -266,6 +320,7 @@ const App: React.FC = () => {
     if (isSessionActive) {
       if (sessionRef.current?.stopStream) sessionRef.current.stopStream();
       setIsSessionActive(false);
+      setStatusText('已结束');
     } else {
       startSession();
     }
@@ -295,13 +350,20 @@ const App: React.FC = () => {
             <div>
               <h1 className="font-black text-2xl tracking-tight leading-none text-[#2D5A27]">LingoLink <span className="text-xs bg-[#2D5A27] text-white px-2 py-0.5 rounded-md ml-2 font-bold uppercase tracking-widest">LIVE</span></h1>
               <div className="flex items-center gap-2 mt-2">
-                <span className={`w-2.5 h-2.5 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : 'bg-rose-400'}`}></span>
-                <p className="text-xs text-[#5E7A5E] uppercase tracking-widest font-black">{isSessionActive ? '通话中' : '等待开始'}</p>
+                <span className={`w-2.5 h-2.5 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : (isConnecting ? 'bg-amber-400 animate-bounce' : 'bg-rose-400')}`}></span>
+                <p className="text-xs text-[#5E7A5E] uppercase tracking-widest font-black">{statusText}</p>
               </div>
             </div>
           </div>
           
           <div className="flex items-center gap-6">
+            <button 
+              onClick={() => window.aistudio.openSelectKey()}
+              className="text-[10px] font-black px-4 py-2 rounded-xl bg-[#F8FBF8] text-[#5E7A5E] border border-[#E1E8E1] hover:bg-white transition-all shadow-sm"
+              title="切换 API 密钥"
+            >
+              <i className="fas fa-key mr-2"></i>API 设置
+            </button>
             <div className="hidden sm:flex gap-2">
               {(['入门', '进阶', '挑战'] as Difficulty[]).map(lvl => (
                 <button
@@ -326,6 +388,17 @@ const App: React.FC = () => {
             </label>
           </div>
         </div>
+        
+        {/* Error Banner */}
+        {errorText && (
+          <div className="bg-rose-50 border border-rose-200 text-rose-700 px-6 py-4 rounded-2xl flex items-center justify-between animate-fadeIn shadow-inner">
+            <div className="flex items-center gap-4">
+              <i className="fas fa-exclamation-triangle text-xl"></i>
+              <div className="text-xs font-bold leading-relaxed">{errorText}</div>
+            </div>
+            <button onClick={() => setErrorText(null)} className="text-rose-400 hover:text-rose-600 transition-colors p-2"><i className="fas fa-times"></i></button>
+          </div>
+        )}
       </header>
 
       {/* Main Content */}
@@ -337,7 +410,7 @@ const App: React.FC = () => {
                 <p className="font-semibold text-base leading-relaxed">{msg.text}</p>
                 {msg.role === 'ai' && !msg.translation && (
                   <button onClick={() => handleTranslate(msg.id, msg.text)} className="mt-3 text-[10px] font-black uppercase tracking-widest opacity-40 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[#2D5A27]">
-                    <i className="fas fa-language text-xs"></i> {msg.isTranslating ? '正在思考...' : '点此翻译'}
+                    <i className="fas fa-language text-xs"></i> {msg.isTranslating ? '正在生成...' : '中英翻译'}
                   </button>
                 )}
                 {msg.translation && (
@@ -363,7 +436,7 @@ const App: React.FC = () => {
           <div className="p-6 border-b border-[#D1DDD1] bg-[#D1DDD1]/30 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-black text-[#2D5A27] uppercase tracking-widest">实时灵感</h2>
-              <p className="text-[10px] text-[#5E7A5E] font-bold mt-1">AI 正在根据对话为你准备助攻</p>
+              <p className="text-[10px] text-[#5E7A5E] font-bold mt-1">根据对话生成的回复提示</p>
             </div>
             <button 
               onClick={generateSuggestions}
@@ -378,7 +451,8 @@ const App: React.FC = () => {
             {!isSessionActive ? (
               <div className="h-full flex flex-col items-center justify-center text-center px-6 opacity-30">
                 <i className="fas fa-microphone-slash text-4xl mb-4 text-[#A1B3A1]"></i>
-                <p className="text-xs font-black uppercase tracking-widest text-[#5E7A5E]">尚未连接</p>
+                <p className="text-xs font-black uppercase tracking-widest text-[#5E7A5E]">等待连接</p>
+                <p className="text-[10px] text-[#5E7A5E] mt-2">点击下方麦克风开启精彩对话</p>
               </div>
             ) : suggestions.length > 0 ? (
               suggestions.map((s, idx) => (
