@@ -112,7 +112,7 @@ const App: React.FC = () => {
     const handleOnline = () => { setIsOnline(true); setErrorText(null); };
     const handleOffline = () => { 
       setIsOnline(false); 
-      setErrorText('网络连接已断开，请检查您的路由器或 VPN。');
+      setErrorText('网络连接已断开，请检查您的网络连接或代理。');
       if (isSessionActive) {
         setIsSessionActive(false);
         setIsReconnecting(true);
@@ -210,13 +210,20 @@ const App: React.FC = () => {
   };
 
   const ensureApiKey = async () => {
+    // 优先使用环境变量
     if (process.env.API_KEY && process.env.API_KEY !== '') return true;
-    if (!window.aistudio) throw new Error("无法连接到 API 服务。");
-    const hasKey = await window.aistudio.hasSelectedApiKey();
-    if (!hasKey) {
-      setStatusText('等待密钥选择...');
-      await window.aistudio.openSelectKey();
+    
+    // 如果没有环境变量且环境支持选择密钥，则尝试弹出选择框
+    if (window.aistudio) {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        setStatusText('等待密钥选择...');
+        await window.aistudio.openSelectKey();
+      }
+      return true;
     }
+    
+    // 如果都没，不要抛错太狠，尝试继续，可能会由 SDK 报错
     return true;
   };
 
@@ -315,7 +322,7 @@ const App: React.FC = () => {
               reconnectCountRef.current++;
               setTimeout(() => startSession(true), 2000);
             } else {
-              setErrorText('连接异常断开，请检查网络后手动重连。');
+              setErrorText('连接失败。请确保 API Key 有效且网络畅通。');
               setStatusText('连接失败');
             }
           },
@@ -326,20 +333,21 @@ const App: React.FC = () => {
               reconnectCountRef.current++;
               setTimeout(() => startSession(true), 2000);
             } else {
-              setStatusText('会话结束');
+              setStatusText('会话已断开');
             }
           }
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: "You are 'Vibe' - a charismatic English tutor. Be energetic and helpful.",
+          systemInstruction: "You are 'Vibe' - a charismatic English tutor. Use slang and be energetic.",
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
           inputAudioTranscription: {},
           outputAudioTranscription: {}
         }
       });
     } catch (err: any) {
-      setErrorText('启动失败：' + (err.message || '未知错误'));
+      console.error("Startup Failure:", err);
+      setErrorText('启动失败：' + (err.message || '网络连接被拒绝'));
       setIsConnecting(false);
       setIsReconnecting(false);
     }
@@ -358,111 +366,113 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen max-w-[1200px] mx-auto bg-[#F2F7F2] text-[#1A2E1A] relative overflow-hidden font-sans border-x border-[#E1E8E1] shadow-2xl">
-      {/* Header */}
-      <header className="glass-header px-8 py-5 flex flex-col gap-4 sticky top-0 z-50 shadow-sm border-b border-[#E1E8E1]">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+      {/* Header - 优化移动端响应式布局 */}
+      <header className="glass-header px-4 sm:px-8 py-3 sm:py-5 flex flex-col gap-3 sticky top-0 z-50 shadow-sm border-b border-[#E1E8E1]">
+        <div className="flex flex-wrap items-center justify-between gap-y-3">
+          <div className="flex items-center gap-3">
             <div className="relative">
-              <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white shadow-xl transition-colors ${!isOnline ? 'bg-stone-400' : 'bg-[#2D5A27]'}`}>
-                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-bolt'} text-2xl`}></i>
+              <div className={`w-10 h-10 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl flex items-center justify-center text-white shadow-lg transition-colors ${!isOnline ? 'bg-stone-400' : 'bg-[#2D5A27]'}`}>
+                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-bolt'} text-lg sm:text-2xl`}></i>
               </div>
-              {isSessionActive && <span className="absolute -top-1 -right-1 w-5 h-5 bg-emerald-500 border-4 border-[#F2F7F2] rounded-full animate-ping"></span>}
+              {isSessionActive && <span className="absolute -top-0.5 -right-0.5 w-3 h-3 sm:w-5 sm:h-5 bg-emerald-500 border-2 sm:border-4 border-[#F2F7F2] rounded-full animate-ping"></span>}
             </div>
-            <div>
-              <h1 className="font-black text-2xl tracking-tight leading-none text-[#2D5A27]">LingoLink <span className="text-xs bg-[#2D5A27] text-white px-2 py-0.5 rounded-md ml-2">LIVE</span></h1>
-              <div className="flex items-center gap-2 mt-2">
-                <span className={`w-2.5 h-2.5 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : (isConnecting ? 'bg-amber-400 animate-bounce' : 'bg-rose-400')}`}></span>
-                <p className="text-xs text-[#5E7A5E] uppercase tracking-widest font-black">
-                  {isReconnecting ? `重连中 (${reconnectCountRef.current}/${MAX_RECONNECT_ATTEMPTS})` : statusText}
+            <div className="flex flex-col">
+              <h1 className="font-black text-lg sm:text-2xl tracking-tight leading-none text-[#2D5A27]">
+                LingoLink <span className="text-[10px] bg-[#2D5A27] text-white px-1.5 py-0.5 rounded ml-1 align-middle">LIVE</span>
+              </h1>
+              <div className="flex items-center gap-1.5 mt-1 sm:mt-2">
+                <span className={`w-2 h-2 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : (isConnecting ? 'bg-amber-400 animate-bounce' : 'bg-rose-400')}`}></span>
+                <p className="text-[10px] sm:text-xs text-[#5E7A5E] uppercase tracking-widest font-black">
+                  {isReconnecting ? `重连中 (${reconnectCountRef.current}/3)` : statusText}
                 </p>
               </div>
             </div>
           </div>
           
-          <div className="flex items-center gap-4">
-            {!isOnline && <span className="text-[10px] font-black text-rose-500 bg-rose-50 px-3 py-1.5 rounded-full border border-rose-100 animate-pulse">OFFLINE</span>}
-            <button onClick={() => window.aistudio.openSelectKey()} className="text-[10px] font-black px-4 py-2.5 rounded-xl bg-[#2D5A27] text-white shadow-md active:scale-95 transition-all">
-              <i className="fas fa-key mr-2"></i>API 设置
+          <div className="flex items-center gap-2 sm:gap-4">
+            <button 
+              onClick={() => window.aistudio?.openSelectKey()} 
+              className={`text-[9px] sm:text-[10px] font-black px-3 py-2 rounded-lg sm:rounded-xl text-white shadow-md active:scale-95 transition-all flex items-center gap-2 ${window.aistudio ? 'bg-[#2D5A27]' : 'bg-stone-400 cursor-not-allowed'}`}
+              title={window.aistudio ? "API 设置" : "当前环境不支持"}
+            >
+              <i className="fas fa-key"></i> <span className="hidden xs:inline">API 设置</span>
             </button>
-            <label className="flex items-center gap-3 cursor-pointer bg-[#F8FBF8] px-4 py-2 rounded-2xl border border-[#E1E8E1]">
-              <span className="text-xs font-black text-[#5E7A5E]">双语</span>
-              <div onClick={() => setGlobalBilingual(!globalBilingual)} className={`w-12 h-7 rounded-full p-1 transition-colors duration-300 ${globalBilingual ? 'bg-[#2D5A27]' : 'bg-[#D1DDD1]'}`}>
-                <div className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform duration-300 ${globalBilingual ? 'translate-x-5' : 'translate-x-0'}`}></div>
+            
+            <label className="flex items-center gap-2 sm:gap-3 cursor-pointer bg-[#F8FBF8] px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl border border-[#E1E8E1] shadow-sm">
+              <span className="text-[9px] sm:text-xs font-black text-[#5E7A5E]">双语</span>
+              <div onClick={() => setGlobalBilingual(!globalBilingual)} className={`w-9 h-5 sm:w-11 sm:h-6 rounded-full p-0.5 sm:p-1 transition-colors duration-300 ${globalBilingual ? 'bg-[#2D5A27]' : 'bg-[#D1DDD1]'}`}>
+                <div className={`w-4 h-4 sm:w-4 sm:h-4 bg-white rounded-full shadow-sm transform transition-transform duration-300 ${globalBilingual ? 'translate-x-4 sm:translate-x-5' : 'translate-x-0'}`}></div>
               </div>
             </label>
           </div>
         </div>
         
         {errorText && (
-          <div className="bg-rose-50 border-2 border-rose-200 text-rose-800 px-6 py-4 rounded-3xl flex items-start gap-4 animate-fadeIn shadow-lg">
-            <i className="fas fa-exclamation-triangle text-2xl text-rose-500 mt-0.5"></i>
-            <div className="flex-1 text-sm font-medium">{errorText}</div>
-            <button onClick={() => setErrorText(null)} className="text-rose-400"><i className="fas fa-times"></i></button>
+          <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl sm:rounded-2xl flex items-start gap-3 animate-fadeIn shadow-md">
+            <i className="fas fa-exclamation-circle text-lg text-rose-500 mt-0.5"></i>
+            <div className="flex-1 text-[11px] sm:text-sm font-medium">{errorText}</div>
+            <button onClick={() => setErrorText(null)} className="text-rose-400 p-1"><i className="fas fa-times"></i></button>
           </div>
         )}
       </header>
 
       {/* Main Content */}
       <div className="flex flex-1 overflow-hidden relative">
-        <main ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-10 space-y-8 chat-area no-scrollbar">
+        <main ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 sm:py-10 space-y-6 sm:space-y-8 chat-area no-scrollbar">
           {messages.map((msg) => (
             <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start animate-fadeIn'}`}>
-              <div className={`message-bubble p-6 rounded-3xl shadow-sm group relative ${msg.role === 'user' ? 'user-bubble' : 'ai-bubble'}`}>
-                <p className="font-semibold text-base leading-relaxed">{msg.text}</p>
+              <div className={`message-bubble p-4 sm:p-6 rounded-2xl sm:rounded-3xl shadow-sm group relative ${msg.role === 'user' ? 'user-bubble' : 'ai-bubble'}`}>
+                <p className="font-semibold text-sm sm:text-base leading-relaxed">{msg.text}</p>
                 {msg.role === 'ai' && !msg.translation && (
-                  <button onClick={() => handleTranslate(msg.id, msg.text)} className="mt-3 text-[10px] font-black uppercase tracking-widest opacity-40 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[#2D5A27]">
+                  <button onClick={() => handleTranslate(msg.id, msg.text)} className="mt-2 text-[9px] font-black uppercase tracking-widest opacity-60 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[#2D5A27]">
                     <i className="fas fa-language"></i> {msg.isTranslating ? '正在生成...' : '显示翻译'}
                   </button>
                 )}
-                {msg.translation && <div className="mt-4 pt-4 border-t border-[#D1DDD1] text-sm text-[#5E7A5E] italic animate-fadeIn">{msg.translation}</div>}
+                {msg.translation && <div className="mt-3 pt-3 border-t border-[#D1DDD1] text-[11px] sm:text-sm text-[#5E7A5E] italic animate-fadeIn">{msg.translation}</div>}
               </div>
             </div>
           ))}
           {isAISpeaking && (
             <div className="flex items-center gap-3 ml-2">
-              <div className="flex gap-1.5 p-4 bg-[#F8FBF8] rounded-2xl border border-[#E1E8E1]">
-                <span className="w-2 h-2 bg-[#2D5A27] rounded-full animate-bounce"></span>
-                <span className="w-2 h-2 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.2s]"></span>
-                <span className="w-2 h-2 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.4s]"></span>
+              <div className="flex gap-1 p-3 bg-[#F8FBF8] rounded-xl border border-[#E1E8E1]">
+                <span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce"></span>
+                <span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                <span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.4s]"></span>
               </div>
             </div>
           )}
         </main>
 
-        {/* Suggestions Sidebar */}
-        <aside className="w-[360px] hidden lg:flex flex-col bg-[#EBF2EB] border-l border-[#E1E8E1] overflow-hidden shadow-xl z-20">
-          <div className="p-6 border-b border-[#D1DDD1] bg-[#D1DDD1]/30 flex items-center justify-between">
+        {/* Suggestions Sidebar - 在窄屏上自动隐藏 */}
+        <aside className="w-[340px] hidden md:flex flex-col bg-[#EBF2EB] border-l border-[#E1E8E1] overflow-hidden shadow-xl z-20">
+          <div className="p-5 border-b border-[#D1DDD1] bg-[#D1DDD1]/30 flex items-center justify-between">
             <div>
-              <h2 className="text-sm font-black text-[#2D5A27] uppercase tracking-widest flex items-center gap-2">
+              <h2 className="text-xs font-black text-[#2D5A27] uppercase tracking-widest flex items-center gap-2">
                 实时灵感 
-                {isGeneratingSuggestions && <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>}
+                {isGeneratingSuggestions && <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping"></span>}
               </h2>
-              <p className="text-[10px] text-[#5E7A5E] font-bold mt-1">
-                {isGeneratingSuggestions ? '正在捕捉你的思路...' : 'AI 已为你准备好回复'}
-              </p>
             </div>
             <button 
               onClick={generateSuggestions}
               disabled={isGeneratingSuggestions || !isSessionActive}
-              className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all ${isSessionActive ? 'bg-white shadow-sm hover:rotate-180 text-[#2D5A27]' : 'bg-[#D1DDD1] text-stone-400'}`}
+              className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isSessionActive ? 'bg-white shadow-sm hover:rotate-180 text-[#2D5A27]' : 'bg-[#D1DDD1] text-stone-400'}`}
             >
-              <i className={`fas fa-sync-alt ${isGeneratingSuggestions ? 'animate-spin' : ''}`}></i>
+              <i className={`fas fa-sync-alt text-xs ${isGeneratingSuggestions ? 'animate-spin' : ''}`}></i>
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-6 space-y-4 no-scrollbar">
+          <div className="flex-1 overflow-y-auto p-5 space-y-4 no-scrollbar">
             {!isSessionActive ? (
-              <div className="h-full flex flex-col items-center justify-center text-center px-6 opacity-30">
-                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-microphone-slash'} text-4xl mb-4`}></i>
-                <p className="text-xs font-black uppercase tracking-widest">{!isOnline ? '网络已断开' : '尚未连接'}</p>
+              <div className="h-full flex flex-col items-center justify-center text-center px-4 opacity-30">
+                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-microphone-slash'} text-3xl mb-3`}></i>
+                <p className="text-[10px] font-black uppercase tracking-widest">{!isOnline ? '网络中断' : '尚未开始对话'}</p>
               </div>
             ) : isGeneratingSuggestions ? (
               <div className="space-y-4">
-                {[1, 2, 3].map(i => (
-                  <div key={i} className="bg-white/50 border border-[#E1E8E1] p-6 rounded-[2rem] space-y-3">
-                    <div className="h-4 bg-[#D1DDD1] rounded w-1/4 animate-pulse"></div>
-                    <div className="h-6 bg-[#D1DDD1] rounded w-full animate-pulse"></div>
-                    <div className="h-4 bg-[#D1DDD1] rounded w-3/4 animate-pulse"></div>
+                {[1, 2].map(i => (
+                  <div key={i} className="bg-white/50 border border-[#E1E8E1] p-5 rounded-2xl space-y-2.5">
+                    <div className="h-3 bg-[#D1DDD1] rounded w-1/4 animate-pulse"></div>
+                    <div className="h-5 bg-[#D1DDD1] rounded w-full animate-pulse"></div>
                   </div>
                 ))}
               </div>
@@ -471,49 +481,49 @@ const App: React.FC = () => {
                 <button
                   key={idx}
                   onClick={() => setMessages(prev => [...prev, { id: `u-hint-${Date.now()}`, role: 'user', text: s.en }])}
-                  className="w-full bg-[#F8FBF8] border border-[#E1E8E1] hover:border-[#2D5A27]/40 p-6 rounded-[2rem] text-left shadow-sm hover:shadow-md transition-all group active:scale-[0.98]"
+                  className="w-full bg-[#F8FBF8] border border-[#E1E8E1] hover:border-[#2D5A27]/40 p-5 rounded-2xl text-left shadow-sm hover:shadow-md transition-all group active:scale-[0.98]"
                 >
-                  <div className={`inline-block px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-tighter mb-2 ${
+                  <div className={`inline-block px-2.5 py-0.5 rounded-full text-[8px] font-black uppercase tracking-tighter mb-2 ${
                     s.tag === 'Flow' ? 'bg-emerald-600 text-white' : s.tag === 'Dive' ? 'bg-teal-700 text-white' : 'bg-stone-600 text-white'
                   }`}>
                     {s.label}
                   </div>
-                  <p className="text-[15px] font-extrabold text-[#1A2E1A] leading-tight mb-3 group-hover:text-[#2D5A27]">{s.en}</p>
-                  <p className="text-[11px] text-[#5E7A5E] font-bold border-t border-[#F2F7F2] pt-2">{s.cn}</p>
+                  <p className="text-[14px] font-extrabold text-[#1A2E1A] leading-tight mb-2 group-hover:text-[#2D5A27]">{s.en}</p>
+                  <p className="text-[10px] text-[#5E7A5E] font-bold border-t border-[#F2F7F2] pt-1.5">{s.cn}</p>
                 </button>
               ))
             ) : (
-              <p className="text-center text-[10px] text-[#5E7A5E] font-bold mt-10">开始说话，灵感即现 ✨</p>
+              <p className="text-center text-[9px] text-[#5E7A5E] font-bold mt-10">灵感将在你开口后出现 ✨</p>
             )}
           </div>
         </aside>
       </div>
 
       {/* Control Area */}
-      <footer className="h-36 flex items-center justify-center pointer-events-none z-50 px-8">
+      <footer className="h-24 sm:h-36 flex items-center justify-center pointer-events-none z-50 px-8">
         <div className="pointer-events-auto flex items-center gap-10">
           <button 
             onClick={toggleSession}
             disabled={isConnecting || !isOnline}
-            className={`w-28 h-28 rounded-[3.5rem] flex items-center justify-center text-4xl shadow-2xl transition-all relative border-4 border-[#F2F7F2] z-10 active:scale-90 hover:scale-105 ${
+            className={`w-20 h-20 sm:w-28 sm:h-28 rounded-full sm:rounded-[3.5rem] flex items-center justify-center text-3xl sm:text-4xl shadow-2xl transition-all relative border-4 border-[#F2F7F2] z-10 active:scale-90 hover:scale-105 ${
               !isOnline ? 'bg-stone-300 text-stone-500 cursor-not-allowed' :
               isSessionActive ? 'bg-[#2D5A27] text-white animate-softPulse' : 'bg-[#F8FBF8] text-[#2D5A27] border-[#E1E8E1]'
             }`}
           >
             {isConnecting ? (
-              <div className="loader"></div>
+              <div className="loader scale-75 sm:scale-100"></div>
             ) : (
               <i className={`fas ${!isOnline ? 'fa-wifi-slash' : isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-20'}`}></i>
             )}
             
             {isAISpeaking && (
-              <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-[#2D5A27] text-white text-[10px] px-6 py-2.5 rounded-2xl font-black shadow-2xl animate-bounce whitespace-nowrap">
-                AI 正在说话...
+              <div className="absolute -top-10 sm:-top-12 left-1/2 -translate-x-1/2 bg-[#2D5A27] text-white text-[8px] sm:text-[10px] px-4 sm:px-6 py-2 rounded-xl sm:rounded-2xl font-black shadow-2xl animate-bounce whitespace-nowrap">
+                VIBE 正在回复...
               </div>
             )}
             {isReconnecting && (
-              <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-[8px] font-black text-amber-600 animate-pulse uppercase tracking-widest">
-                Reconnecting...
+              <div className="absolute -bottom-6 sm:-bottom-8 left-1/2 -translate-x-1/2 text-[8px] font-black text-amber-600 animate-pulse uppercase tracking-widest">
+                正在自动恢复...
               </div>
             )}
           </button>
