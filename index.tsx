@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { GoogleGenAI, LiveServerMessage, Modality, Blob } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Blob, Type } from '@google/genai';
 
 // --- 类型定义 ---
 interface Message {
@@ -21,16 +21,13 @@ interface Suggestion {
 
 type Difficulty = '入门' | '进阶' | '挑战';
 
-// Fix: Defining AIStudio interface to match existing global declarations and fixing Window interface property type
 declare global {
   interface AIStudio {
     hasSelectedApiKey: () => Promise<boolean>;
     openSelectKey: () => Promise<void>;
   }
-
-  interface Window {
-    aistudio: AIStudio;
-  }
+  // Fix: Declare aistudio as a global variable using 'var' to avoid modifier conflicts when merging with the Window interface.
+  var aistudio: AIStudio;
 }
 
 // --- 常量配置 ---
@@ -136,7 +133,7 @@ const App: React.FC = () => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: TRANSLATION_MODEL_NAME,
-        contents: `Translate this naturally to Chinese (informal/casual): "${text}". Keep the slang vibes if present.`,
+        contents: `Translate this naturally to Chinese: "${text}". Keep it casual.`,
       });
       const translation = response.text?.trim() || "翻译暂时不可用。";
       setMessages(prev => prev.map(m => m.id === id ? { ...m, translation, isTranslating: false } : m));
@@ -152,12 +149,28 @@ const App: React.FC = () => {
     try {
       const context = messages.slice(-4).map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n');
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Recommended: provide a responseSchema when requesting JSON output.
       const response = await ai.models.generateContent({
         model: TRANSLATION_MODEL_NAME,
         contents: `Conversation Context:\n${context}\n\nDifficulty: ${difficulty}\n
-        Generate 3 high-quality response suggestions in JSON format for an English learner. 
+        Generate 3 high-quality response suggestions for an English learner. 
         Structure: [{"tag": "Flow", "label": "顺向接话", "en": "...", "cn": "..."}, ...]`,
-        config: { responseMimeType: "application/json" }
+        config: { 
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                tag: { type: Type.STRING },
+                label: { type: Type.STRING },
+                en: { type: Type.STRING },
+                cn: { type: Type.STRING }
+              },
+              required: ["tag", "label", "en", "cn"]
+            }
+          }
+        }
       });
       
       const text = response.text?.trim() || "[]";
@@ -169,12 +182,22 @@ const App: React.FC = () => {
     }
   };
 
-  const checkApiKey = async () => {
-    if (process.env.API_KEY) return true;
+  const ensureApiKey = async () => {
+    // 1. 检查环境变量
+    if (process.env.API_KEY && process.env.API_KEY !== '') return true;
+    
+    // 2. 检查 window.aistudio 是否可用
+    if (!window.aistudio) {
+      throw new Error("无法连接到 API 服务。请在官方支持的环境中运行。");
+    }
+
+    // 3. 检查是否已选择
     const hasKey = await window.aistudio.hasSelectedApiKey();
     if (!hasKey) {
+      setStatusText('请选择 API 密钥...');
       await window.aistudio.openSelectKey();
-      return true; // 假设用户选择成功
+      // 竞态处理：开启后即假设成功，后续调用会由 SDK 自动重试或报错
+      return true;
     }
     return true;
   };
@@ -183,29 +206,29 @@ const App: React.FC = () => {
     if (isSessionActive || isConnecting) return;
     setErrorText(null);
     setIsConnecting(true);
-    setStatusText('连接中...');
+    setStatusText('自检中...');
 
-    // 1. 安全环境检查
+    // 1. HTTPS 安全检查
     if (!window.isSecureContext) {
-      setErrorText('API 要求 HTTPS 环境。请检查您的域名是否已开启 SSL。');
+      setErrorText('浏览器要求 HTTPS 环境才能开启麦克风。请确保当前地址以 https:// 开头。');
       setIsConnecting(false);
       return;
     }
 
-    // 2. 密钥检查
+    // 2. 密钥检查与唤起
     try {
-      await checkApiKey();
-    } catch (e) {
-      setErrorText('无法获取 API 密钥，请重试。');
+      await ensureApiKey();
+    } catch (e: any) {
+      setErrorText(e.message || 'API 密钥授权失败。');
       setIsConnecting(false);
       return;
     }
 
     try {
-      setStatusText('开启麦克风...');
+      setStatusText('启动麦克风...');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      setStatusText('握手 AI 引擎...');
+      setStatusText('正在呼叫 AI...');
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       if (!inputAudioCtxRef.current) inputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
@@ -280,20 +303,21 @@ const App: React.FC = () => {
           onerror: (err: any) => {
             console.error("Session Error:", err);
             const msg = err.message || "";
-            if (msg.includes("Requested entity was not found")) {
+            if (msg.includes("Requested entity was not found") || msg.includes("403") || msg.includes("401")) {
               setErrorText(
                 <div className="flex flex-col gap-2">
-                  <p>API 密钥无效或项目未开启计费。</p>
+                  <p>API 密钥失效或项目未开启计费（Billing）。</p>
                   <div className="flex gap-4">
                     <button onClick={() => window.aistudio.openSelectKey()} className="underline font-bold">重新选择密钥</button>
-                    <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline opacity-70">查看计费文档</a>
+                    <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline opacity-70">查看计费指南</a>
                   </div>
                 </div>
               );
             } else {
-              setErrorText('连接发生错误，请刷新页面。');
+              setErrorText('连接 AI 失败，请检查网络或刷新重试。');
             }
             setIsSessionActive(false);
+            setIsConnecting(false);
           },
           onclose: () => {
             setIsSessionActive(false);
@@ -302,7 +326,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: "You are 'Vibe' - the world's most charismatic English tutor. Use modern slang.",
+          systemInstruction: "You are 'Vibe' - a charismatic English tutor. Use slang and be energetic.",
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
           inputAudioTranscription: {},
           outputAudioTranscription: {}
@@ -310,9 +334,9 @@ const App: React.FC = () => {
       });
     } catch (err: any) {
       console.error("Start Session Error:", err);
-      setErrorText(err.message || '麦克风请求失败，请确保已授权。');
+      setErrorText('麦克风开启失败，请确认已授予应用录音权限。');
       setIsConnecting(false);
-      setStatusText('启动失败');
+      setStatusText('失败');
     }
   };
 
@@ -326,15 +350,6 @@ const App: React.FC = () => {
     }
   };
 
-  const getTagStyle = (tag: string) => {
-    switch(tag) {
-      case 'Flow': return 'bg-emerald-600 text-white';
-      case 'Dive': return 'bg-teal-700 text-white';
-      case 'Safety': return 'bg-stone-600 text-white';
-      default: return 'bg-stone-400 text-white';
-    }
-  };
-
   return (
     <div className="flex flex-col h-screen max-w-[1200px] mx-auto bg-[#F2F7F2] text-[#1A2E1A] relative overflow-hidden font-sans border-x border-[#E1E8E1] shadow-2xl">
       {/* Header */}
@@ -342,7 +357,7 @@ const App: React.FC = () => {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="relative">
-              <div className="w-14 h-14 bg-[#2D5A27] rounded-2xl flex items-center justify-center text-white shadow-xl">
+              <div className="w-14 h-14 bg-[#2D5A27] rounded-2xl flex items-center justify-center text-white shadow-xl hover:rotate-6 transition-transform">
                 <i className="fas fa-bolt text-2xl"></i>
               </div>
               {isSessionActive && <span className="absolute -top-1 -right-1 w-5 h-5 bg-emerald-500 border-4 border-[#F2F7F2] rounded-full animate-ping"></span>}
@@ -356,11 +371,10 @@ const App: React.FC = () => {
             </div>
           </div>
           
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-4 sm:gap-6">
             <button 
               onClick={() => window.aistudio.openSelectKey()}
-              className="text-[10px] font-black px-4 py-2 rounded-xl bg-[#F8FBF8] text-[#5E7A5E] border border-[#E1E8E1] hover:bg-white transition-all shadow-sm"
-              title="切换 API 密钥"
+              className="text-[10px] font-black px-4 py-2.5 rounded-xl bg-[#2D5A27] text-white hover:bg-[#1A2E1A] transition-all shadow-md active:scale-95"
             >
               <i className="fas fa-key mr-2"></i>API 设置
             </button>
@@ -410,7 +424,7 @@ const App: React.FC = () => {
                 <p className="font-semibold text-base leading-relaxed">{msg.text}</p>
                 {msg.role === 'ai' && !msg.translation && (
                   <button onClick={() => handleTranslate(msg.id, msg.text)} className="mt-3 text-[10px] font-black uppercase tracking-widest opacity-40 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[#2D5A27]">
-                    <i className="fas fa-language text-xs"></i> {msg.isTranslating ? '正在生成...' : '中英翻译'}
+                    <i className="fas fa-language text-xs"></i> {msg.isTranslating ? '正在生成...' : '显示翻译'}
                   </button>
                 )}
                 {msg.translation && (
@@ -436,7 +450,7 @@ const App: React.FC = () => {
           <div className="p-6 border-b border-[#D1DDD1] bg-[#D1DDD1]/30 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-black text-[#2D5A27] uppercase tracking-widest">实时灵感</h2>
-              <p className="text-[10px] text-[#5E7A5E] font-bold mt-1">根据对话生成的回复提示</p>
+              <p className="text-[10px] text-[#5E7A5E] font-bold mt-1">AI 正在捕捉对话细节</p>
             </div>
             <button 
               onClick={generateSuggestions}
@@ -451,7 +465,7 @@ const App: React.FC = () => {
             {!isSessionActive ? (
               <div className="h-full flex flex-col items-center justify-center text-center px-6 opacity-30">
                 <i className="fas fa-microphone-slash text-4xl mb-4 text-[#A1B3A1]"></i>
-                <p className="text-xs font-black uppercase tracking-widest text-[#5E7A5E]">等待连接</p>
+                <p className="text-xs font-black uppercase tracking-widest text-[#5E7A5E]">尚未连接</p>
                 <p className="text-[10px] text-[#5E7A5E] mt-2">点击下方麦克风开启精彩对话</p>
               </div>
             ) : suggestions.length > 0 ? (
@@ -463,7 +477,9 @@ const App: React.FC = () => {
                   }}
                   className="w-full bg-[#F8FBF8] border border-[#E1E8E1] hover:border-[#2D5A27]/40 p-6 rounded-[2rem] text-left shadow-sm hover:shadow-md transition-all group active:scale-[0.98]"
                 >
-                  <div className={`inline-block px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-tighter mb-2 ${getTagStyle(s.tag)}`}>
+                  <div className={`inline-block px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-tighter mb-2 ${
+                    s.tag === 'Flow' ? 'bg-emerald-600 text-white' : s.tag === 'Dive' ? 'bg-teal-700 text-white' : 'bg-stone-600 text-white'
+                  }`}>
                     {s.label}
                   </div>
                   <p className="text-[15px] font-extrabold text-[#1A2E1A] leading-tight mb-3 group-hover:text-[#2D5A27]">{s.en}</p>
@@ -486,14 +502,14 @@ const App: React.FC = () => {
             onClick={toggleSession}
             disabled={isConnecting}
             className={`w-28 h-28 rounded-[3.5rem] flex items-center justify-center text-4xl shadow-2xl transition-all relative border-4 border-[#F2F7F2] z-10 active:scale-90 hover:scale-105 ${
-              isSessionActive ? 'bg-[#2D5A27] text-white' : 'bg-[#F8FBF8] text-[#2D5A27] border-[#E1E8E1]'
+              isSessionActive ? 'bg-[#2D5A27] text-white animate-softPulse' : 'bg-[#F8FBF8] text-[#2D5A27] border-[#E1E8E1]'
             }`}
           >
-            {isConnecting ? <span className="loader"></span> : <i className={`fas ${isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-20'}`}></i>}
+            {isConnecting ? <div className="loader"></div> : <i className={`fas ${isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-20'}`}></i>}
             
             {isAISpeaking && (
               <div className="absolute -top-10 left-1/2 -translate-x-1/2 bg-[#2D5A27] text-white text-[10px] px-6 py-2.5 rounded-2xl font-black shadow-2xl animate-bounce">
-                AI 说话中
+                AI 正在说话
               </div>
             )}
           </button>
