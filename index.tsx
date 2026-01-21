@@ -31,7 +31,8 @@ declare global {
 
 // --- 常量配置 ---
 const LIVE_MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-12-2025';
-const TRANSLATION_MODEL_NAME = 'gemini-3-flash-preview';
+const TRANSLATION_MODEL_NAME = 'gemini-3-flash-preview'; 
+const SUGGESTION_MODEL_NAME = 'gemini-3-flash-preview';
 const MAX_RECONNECT_ATTEMPTS = 3;
 
 // --- 辅助函数 ---
@@ -78,7 +79,7 @@ const App: React.FC = () => {
     {
       id: '1',
       role: 'ai',
-      text: "Yo! Ready to kill it? 🚀 Forget the boring textbook stuff, let's talk like real friends! What's the wildest thing that happened to you lately?"
+      text: "Yo! Ready to vibe with some English? 🚀 I'm here to talk about anything—from crazy weekend plans to your favorite snacks. What's on your mind today?"
     }
   ]);
   const [difficulty, setDifficulty] = useState<Difficulty>('进阶');
@@ -112,7 +113,7 @@ const App: React.FC = () => {
     const handleOnline = () => { setIsOnline(true); setErrorText(null); };
     const handleOffline = () => { 
       setIsOnline(false); 
-      setErrorText('网络连接已断开，请检查您的网络连接或代理。');
+      setErrorText('网络连接已断开，请检查网络或代理。');
       if (isSessionActive) {
         setIsSessionActive(false);
         setIsReconnecting(true);
@@ -148,41 +149,76 @@ const App: React.FC = () => {
     return () => clearInterval(checkStatus);
   }, [isAISpeaking]);
 
-  const handleTranslate = async (id: string, text: string) => {
-    const msg = messages.find(m => m.id === id);
-    if (msg?.translation || msg?.isTranslating) return;
+  // 当双语模式开启时，仅翻译当前未翻译的消息
+  useEffect(() => {
+    if (globalBilingual) {
+      messages.forEach(msg => {
+        if (msg.role === 'ai' && !msg.translation && !msg.isTranslating) {
+          handleTranslate(msg.id, msg.text);
+        }
+      });
+    }
+  }, [globalBilingual]);
 
-    setMessages(prev => prev.map(m => m.id === id ? { ...m, isTranslating: true } : m));
+  const handleTranslate = async (id: string, text: string) => {
+    if (!process.env.API_KEY) {
+      setErrorText('请先点击右上角的“API 设置”按钮选择有效的 API Key。');
+      return;
+    }
+    
+    let shouldSkip = false;
+    setMessages(prev => {
+      const msg = prev.find(m => m.id === id);
+      if (msg?.translation || msg?.isTranslating) {
+        shouldSkip = true;
+        return prev;
+      }
+      return prev.map(m => m.id === id ? { ...m, isTranslating: true } : m);
+    });
+
+    if (shouldSkip) return;
+    
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: TRANSLATION_MODEL_NAME,
-        contents: `Translate this naturally to Chinese: "${text}". Keep it casual.`,
+        contents: `Translate to casual spoken Chinese: "${text}"`,
+        config: {
+            systemInstruction: "You are a professional casual translator. Translate English slang and idioms into natural, modern Chinese spoken language. Output ONLY the translation.",
+            temperature: 0.1,
+        }
       });
       const translation = response.text?.trim() || "翻译暂时不可用。";
       setMessages(prev => prev.map(m => m.id === id ? { ...m, translation, isTranslating: false } : m));
     } catch (err) {
+      console.error("Translation Error:", err);
       setMessages(prev => prev.map(m => m.id === id ? { ...m, isTranslating: false } : m));
     }
   };
 
   const generateSuggestions = async () => {
-    if (isGeneratingSuggestions) return;
+    if (isGeneratingSuggestions || !process.env.API_KEY) return;
     setIsGeneratingSuggestions(true);
     
     try {
+      // 提取更丰富的上下文以确保相关性
       const lastContext = [
-        ...messages.slice(-3),
+        ...messages.slice(-4), // 包含更多轮次
         { role: 'user', text: currentInputText.current }
       ].map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n');
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
-        model: TRANSLATION_MODEL_NAME,
-        contents: `Conversation Context:\n${lastContext}\n\nDifficulty: ${difficulty}\n
-        Task: 3 short responses.
-        Format: [{"tag": "Flow", "label": "顺向接话", "en": "...", "cn": "..."}, ...]`,
+        model: SUGGESTION_MODEL_NAME,
+        contents: `Recent conversation:\n${lastContext}\n\nBased on this, generate 3 highly relevant and natural next steps for the user.`,
         config: { 
+          systemInstruction: `You are an expert English conversation coach. 
+          Task: Analyze the context and provide 3 response suggestions that feel natural and keep the vibe alive.
+          - 'Flow': A natural continuation or direct answer.
+          - 'Dive': A deeper follow-up question or thought-provoking comment.
+          - 'Safety': A way to ask for clarification if something was unclear.
+          JSON ONLY. Values must be contextually unique to the current conversation.`,
+          temperature: 0.3, // 稍微提高一点以增加回复的生命力
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.ARRAY,
@@ -210,10 +246,7 @@ const App: React.FC = () => {
   };
 
   const ensureApiKey = async () => {
-    // 优先使用环境变量
     if (process.env.API_KEY && process.env.API_KEY !== '') return true;
-    
-    // 如果没有环境变量且环境支持选择密钥，则尝试弹出选择框
     if (window.aistudio) {
       const hasKey = await window.aistudio.hasSelectedApiKey();
       if (!hasKey) {
@@ -222,9 +255,7 @@ const App: React.FC = () => {
       }
       return true;
     }
-    
-    // 如果都没，不要抛错太狠，尝试继续，可能会由 SDK 报错
-    return true;
+    return false;
   };
 
   const startSession = async (autoRetry = false) => {
@@ -242,10 +273,18 @@ const App: React.FC = () => {
 
     setIsConnecting(true);
     setIsReconnecting(autoRetry);
-    setStatusText(autoRetry ? '尝试重连...' : '自检中...');
+    setStatusText(autoRetry ? '尝试重连...' : '准备中...');
 
     try {
       await ensureApiKey();
+      
+      if (!process.env.API_KEY) {
+        setErrorText('启动失败：未检测到 API Key。');
+        setIsConnecting(false);
+        setIsReconnecting(false);
+        return;
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
@@ -306,8 +345,14 @@ const App: React.FC = () => {
               if (uText) setMessages(prev => [...prev, { id: `u-${Date.now()}`, role: 'user', text: uText }]);
               if (aText) {
                 const id = `a-${Date.now()}`;
-                setMessages(prev => [...prev, { id, role: 'ai', text: aText }]);
-                if (globalBilingual) handleTranslate(id, aText);
+                setMessages(prev => {
+                  const newMsgs = [...prev, { id, role: 'ai', text: aText }];
+                  // 双语开启时，自动开启翻译
+                  if (globalBilingual) {
+                    setTimeout(() => handleTranslate(id, aText), 50);
+                  }
+                  return newMsgs;
+                });
               }
               currentInputText.current = ''; currentOutputText.current = '';
               hasTriggeredSuggestionsRef.current = false;
@@ -317,12 +362,11 @@ const App: React.FC = () => {
             console.error("Live API Error:", err);
             setIsSessionActive(false); 
             setIsConnecting(false);
-            
             if (reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS && !userManuallyStopped.current) {
               reconnectCountRef.current++;
               setTimeout(() => startSession(true), 2000);
             } else {
-              setErrorText('连接失败。请确保 API Key 有效且网络畅通。');
+              setErrorText('连接异常断开。');
               setStatusText('连接失败');
             }
           },
@@ -333,13 +377,13 @@ const App: React.FC = () => {
               reconnectCountRef.current++;
               setTimeout(() => startSession(true), 2000);
             } else {
-              setStatusText('会话已断开');
+              setStatusText('会话已结束');
             }
           }
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: "You are 'Vibe' - a charismatic English tutor. Use slang and be energetic.",
+          systemInstruction: "You are 'Vibe' - a charismatic English tutor. Use slang and be energetic. If audio is unclear, politely ask the user to type or repeat.",
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
           inputAudioTranscription: {},
           outputAudioTranscription: {}
@@ -347,7 +391,7 @@ const App: React.FC = () => {
       });
     } catch (err: any) {
       console.error("Startup Failure:", err);
-      setErrorText('启动失败：' + (err.message || '网络连接被拒绝'));
+      setErrorText('启动失败：' + (err.message || '未知错误'));
       setIsConnecting(false);
       setIsReconnecting(false);
     }
@@ -366,113 +410,131 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen max-w-[1200px] mx-auto bg-[#F2F7F2] text-[#1A2E1A] relative overflow-hidden font-sans border-x border-[#E1E8E1] shadow-2xl">
-      {/* Header - 优化移动端响应式布局 */}
-      <header className="glass-header px-4 sm:px-8 py-3 sm:py-5 flex flex-col gap-3 sticky top-0 z-50 shadow-sm border-b border-[#E1E8E1]">
-        <div className="flex flex-wrap items-center justify-between gap-y-3">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <div className={`w-10 h-10 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl flex items-center justify-center text-white shadow-lg transition-colors ${!isOnline ? 'bg-stone-400' : 'bg-[#2D5A27]'}`}>
-                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-bolt'} text-lg sm:text-2xl`}></i>
+      {/* Header */}
+      <header className="glass-header px-4 sm:px-10 py-4 sm:py-6 flex flex-col gap-4 sticky top-0 z-50 shadow-sm border-b border-[#E1E8E1]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3 sm:gap-5 overflow-hidden">
+            <div className="flex-shrink-0 relative">
+              <div className={`w-11 h-11 sm:w-16 sm:h-16 rounded-2xl sm:rounded-3xl flex items-center justify-center text-white shadow-xl transition-all duration-500 ${!isOnline ? 'bg-stone-400' : (isSessionActive ? 'bg-[#2D5A27] rotate-12 scale-110' : 'bg-[#2D5A27]')}`}>
+                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-bolt'} text-xl sm:text-3xl`}></i>
               </div>
-              {isSessionActive && <span className="absolute -top-0.5 -right-0.5 w-3 h-3 sm:w-5 sm:h-5 bg-emerald-500 border-2 sm:border-4 border-[#F2F7F2] rounded-full animate-ping"></span>}
+              {isSessionActive && <span className="absolute -top-1 -right-1 w-4 h-4 sm:w-6 sm:h-6 bg-emerald-500 border-4 border-[#F2F7F2] rounded-full animate-ping"></span>}
             </div>
-            <div className="flex flex-col">
-              <h1 className="font-black text-lg sm:text-2xl tracking-tight leading-none text-[#2D5A27]">
-                LingoLink <span className="text-[10px] bg-[#2D5A27] text-white px-1.5 py-0.5 rounded ml-1 align-middle">LIVE</span>
+            <div className="flex flex-col min-w-0">
+              <h1 className="font-black text-xl sm:text-3xl tracking-tight leading-none text-[#2D5A27] truncate">
+                LingoLink <span className="text-[10px] sm:text-xs bg-[#2D5A27] text-white px-2 py-0.5 rounded-md ml-1 align-middle">LIVE</span>
               </h1>
-              <div className="flex items-center gap-1.5 mt-1 sm:mt-2">
-                <span className={`w-2 h-2 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : (isConnecting ? 'bg-amber-400 animate-bounce' : 'bg-rose-400')}`}></span>
-                <p className="text-[10px] sm:text-xs text-[#5E7A5E] uppercase tracking-widest font-black">
+              <div className="flex items-center gap-2 mt-1 sm:mt-2">
+                <span className={`w-2 sm:w-2.5 h-2 sm:h-2.5 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : (isConnecting ? 'bg-amber-400 animate-bounce' : 'bg-rose-400')}`}></span>
+                <p className="text-[10px] sm:text-xs text-[#5E7A5E] uppercase tracking-widest font-black truncate">
                   {isReconnecting ? `重连中 (${reconnectCountRef.current}/3)` : statusText}
                 </p>
               </div>
             </div>
           </div>
           
-          <div className="flex items-center gap-2 sm:gap-4">
+          <div className="flex items-center gap-3 sm:gap-5 flex-shrink-0">
             <button 
               onClick={() => window.aistudio?.openSelectKey()} 
-              className={`text-[9px] sm:text-[10px] font-black px-3 py-2 rounded-lg sm:rounded-xl text-white shadow-md active:scale-95 transition-all flex items-center gap-2 ${window.aistudio ? 'bg-[#2D5A27]' : 'bg-stone-400 cursor-not-allowed'}`}
-              title={window.aistudio ? "API 设置" : "当前环境不支持"}
+              className={`group relative flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl transition-all shadow-md active:scale-95 ${window.aistudio ? 'bg-white text-[#2D5A27] hover:bg-[#2D5A27] hover:text-white' : 'bg-stone-200 text-stone-400 cursor-not-allowed'}`}
+              title="API 设置"
             >
-              <i className="fas fa-key"></i> <span className="hidden xs:inline">API 设置</span>
+              <i className="fas fa-key text-lg sm:text-xl"></i>
+              {!process.env.API_KEY && isOnline && (
+                <span className="absolute -top-1 -right-1 w-3 h-3 bg-rose-500 rounded-full border-2 border-white animate-pulse"></span>
+              )}
             </button>
             
-            <label className="flex items-center gap-2 sm:gap-3 cursor-pointer bg-[#F8FBF8] px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl border border-[#E1E8E1] shadow-sm">
-              <span className="text-[9px] sm:text-xs font-black text-[#5E7A5E]">双语</span>
-              <div onClick={() => setGlobalBilingual(!globalBilingual)} className={`w-9 h-5 sm:w-11 sm:h-6 rounded-full p-0.5 sm:p-1 transition-colors duration-300 ${globalBilingual ? 'bg-[#2D5A27]' : 'bg-[#D1DDD1]'}`}>
-                <div className={`w-4 h-4 sm:w-4 sm:h-4 bg-white rounded-full shadow-sm transform transition-transform duration-300 ${globalBilingual ? 'translate-x-4 sm:translate-x-5' : 'translate-x-0'}`}></div>
+            <label className="flex items-center gap-2 sm:gap-4 cursor-pointer bg-white px-3 sm:px-5 py-2 sm:py-3 rounded-xl sm:rounded-2xl border border-[#E1E8E1] shadow-sm hover:shadow-md transition-all">
+              <span className="text-[10px] sm:text-xs font-black text-[#5E7A5E] uppercase tracking-wider">双语</span>
+              <div onClick={() => setGlobalBilingual(!globalBilingual)} className={`w-10 sm:w-12 h-6 sm:h-7 rounded-full p-1 transition-colors duration-300 ${globalBilingual ? 'bg-[#2D5A27]' : 'bg-[#D1DDD1]'}`}>
+                <div className={`w-4 sm:w-5 h-4 sm:h-5 bg-white rounded-full shadow-md transform transition-transform duration-300 ${globalBilingual ? 'translate-x-4 sm:translate-x-5' : 'translate-x-0'}`}></div>
               </div>
             </label>
           </div>
         </div>
         
         {errorText && (
-          <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl sm:rounded-2xl flex items-start gap-3 animate-fadeIn shadow-md">
-            <i className="fas fa-exclamation-circle text-lg text-rose-500 mt-0.5"></i>
-            <div className="flex-1 text-[11px] sm:text-sm font-medium">{errorText}</div>
-            <button onClick={() => setErrorText(null)} className="text-rose-400 p-1"><i className="fas fa-times"></i></button>
+          <div className="bg-rose-50 border-2 border-rose-100 text-rose-800 px-5 sm:px-8 py-4 sm:py-5 rounded-2xl sm:rounded-3xl flex items-start gap-4 animate-fadeIn shadow-xl ring-4 ring-rose-500/5">
+            <div className="bg-rose-500 text-white w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+              <i className="fas fa-exclamation text-sm"></i>
+            </div>
+            <div className="flex-1 text-xs sm:text-sm font-bold leading-relaxed">{errorText}</div>
+            <button onClick={() => setErrorText(null)} className="text-rose-300 hover:text-rose-500 transition-colors p-1">
+              <i className="fas fa-times text-lg"></i>
+            </button>
           </div>
         )}
       </header>
 
       {/* Main Content */}
       <div className="flex flex-1 overflow-hidden relative">
-        <main ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 sm:py-10 space-y-6 sm:space-y-8 chat-area no-scrollbar">
+        <main ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-12 py-8 sm:py-12 space-y-8 sm:space-y-12 chat-area no-scrollbar">
           {messages.map((msg) => (
             <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start animate-fadeIn'}`}>
-              <div className={`message-bubble p-4 sm:p-6 rounded-2xl sm:rounded-3xl shadow-sm group relative ${msg.role === 'user' ? 'user-bubble' : 'ai-bubble'}`}>
-                <p className="font-semibold text-sm sm:text-base leading-relaxed">{msg.text}</p>
-                {msg.role === 'ai' && !msg.translation && (
-                  <button onClick={() => handleTranslate(msg.id, msg.text)} className="mt-2 text-[9px] font-black uppercase tracking-widest opacity-60 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[#2D5A27]">
-                    <i className="fas fa-language"></i> {msg.isTranslating ? '正在生成...' : '显示翻译'}
+              <div className={`message-bubble p-5 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] shadow-sm group relative ${msg.role === 'user' ? 'user-bubble' : 'ai-bubble'}`}>
+                <p className="font-semibold text-sm sm:text-lg leading-relaxed">{msg.text}</p>
+                {/* 仅在关闭双语模式且未翻译时显示按钮 */}
+                {msg.role === 'ai' && !msg.translation && !msg.isTranslating && !globalBilingual && (
+                  <button onClick={() => handleTranslate(msg.id, msg.text)} className="mt-3 text-[10px] font-black uppercase tracking-widest opacity-60 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[#2D5A27]">
+                    <i className="fas fa-language text-xs"></i> 显示翻译
                   </button>
                 )}
-                {msg.translation && <div className="mt-3 pt-3 border-t border-[#D1DDD1] text-[11px] sm:text-sm text-[#5E7A5E] italic animate-fadeIn">{msg.translation}</div>}
+                {/* 翻译显示区域：双语模式或已手动点击翻译 */}
+                {(msg.translation || msg.isTranslating) && (
+                   <div className="mt-4 pt-4 border-t border-[#D1DDD1] text-xs sm:text-base text-[#5E7A5E] italic animate-fadeIn font-medium">
+                     {msg.isTranslating ? (
+                       <span className="flex items-center gap-2 opacity-50">
+                         <i className="fas fa-circle-notch animate-spin"></i> 正在翻译...
+                       </span>
+                     ) : msg.translation}
+                   </div>
+                )}
               </div>
             </div>
           ))}
           {isAISpeaking && (
-            <div className="flex items-center gap-3 ml-2">
-              <div className="flex gap-1 p-3 bg-[#F8FBF8] rounded-xl border border-[#E1E8E1]">
-                <span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce"></span>
-                <span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.2s]"></span>
-                <span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.4s]"></span>
+            <div className="flex items-center gap-3 ml-4">
+              <div className="flex gap-1.5 p-4 bg-white rounded-2xl border border-[#E1E8E1] shadow-sm">
+                <span className="w-2 h-2 bg-[#2D5A27] rounded-full animate-bounce"></span>
+                <span className="w-2 h-2 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                <span className="w-2 h-2 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.4s]"></span>
               </div>
             </div>
           )}
         </main>
 
-        {/* Suggestions Sidebar - 在窄屏上自动隐藏 */}
-        <aside className="w-[340px] hidden md:flex flex-col bg-[#EBF2EB] border-l border-[#E1E8E1] overflow-hidden shadow-xl z-20">
-          <div className="p-5 border-b border-[#D1DDD1] bg-[#D1DDD1]/30 flex items-center justify-between">
+        {/* Suggestions Sidebar */}
+        <aside className="w-[380px] hidden xl:flex flex-col bg-[#EBF2EB] border-l border-[#E1E8E1] overflow-hidden shadow-2xl z-20">
+          <div className="p-8 border-b border-[#D1DDD1] bg-[#D1DDD1]/20 flex items-center justify-between">
             <div>
-              <h2 className="text-xs font-black text-[#2D5A27] uppercase tracking-widest flex items-center gap-2">
+              <h2 className="text-xs font-black text-[#2D5A27] uppercase tracking-widest flex items-center gap-3">
                 实时灵感 
-                {isGeneratingSuggestions && <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping"></span>}
+                {isGeneratingSuggestions && <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>}
               </h2>
             </div>
             <button 
               onClick={generateSuggestions}
               disabled={isGeneratingSuggestions || !isSessionActive}
-              className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isSessionActive ? 'bg-white shadow-sm hover:rotate-180 text-[#2D5A27]' : 'bg-[#D1DDD1] text-stone-400'}`}
+              className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isSessionActive ? 'bg-white shadow-sm hover:rotate-180 text-[#2D5A27]' : 'bg-[#D1DDD1] text-stone-400'}`}
             >
-              <i className={`fas fa-sync-alt text-xs ${isGeneratingSuggestions ? 'animate-spin' : ''}`}></i>
+              <i className={`fas fa-sync-alt text-sm ${isGeneratingSuggestions ? 'animate-spin' : ''}`}></i>
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-5 space-y-4 no-scrollbar">
+          <div className="flex-1 overflow-y-auto p-8 space-y-5 no-scrollbar">
             {!isSessionActive ? (
-              <div className="h-full flex flex-col items-center justify-center text-center px-4 opacity-30">
-                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-microphone-slash'} text-3xl mb-3`}></i>
-                <p className="text-[10px] font-black uppercase tracking-widest">{!isOnline ? '网络中断' : '尚未开始对话'}</p>
+              <div className="h-full flex flex-col items-center justify-center text-center px-8 opacity-25">
+                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-microphone-slash'} text-5xl mb-6`}></i>
+                <p className="text-[10px] font-black uppercase tracking-widest">{!isOnline ? '离线模式' : '点击底部按钮开始'}</p>
               </div>
             ) : isGeneratingSuggestions ? (
-              <div className="space-y-4">
-                {[1, 2].map(i => (
-                  <div key={i} className="bg-white/50 border border-[#E1E8E1] p-5 rounded-2xl space-y-2.5">
+              <div className="space-y-6">
+                {[1, 2, 3].map(i => (
+                  <div key={i} className="bg-white/50 border border-[#E1E8E1] p-6 rounded-[2.5rem] space-y-4">
                     <div className="h-3 bg-[#D1DDD1] rounded w-1/4 animate-pulse"></div>
-                    <div className="h-5 bg-[#D1DDD1] rounded w-full animate-pulse"></div>
+                    <div className="h-6 bg-[#D1DDD1] rounded w-full animate-pulse"></div>
+                    <div className="h-4 bg-[#D1DDD1] rounded w-3/4 animate-pulse"></div>
                   </div>
                 ))}
               </div>
@@ -480,50 +542,54 @@ const App: React.FC = () => {
               suggestions.map((s, idx) => (
                 <button
                   key={idx}
-                  onClick={() => setMessages(prev => [...prev, { id: `u-hint-${Date.now()}`, role: 'user', text: s.en }])}
-                  className="w-full bg-[#F8FBF8] border border-[#E1E8E1] hover:border-[#2D5A27]/40 p-5 rounded-2xl text-left shadow-sm hover:shadow-md transition-all group active:scale-[0.98]"
+                  onClick={() => {
+                    setMessages(prev => [...prev, { id: `u-hint-${Date.now()}`, role: 'user', text: s.en }]);
+                    // 选择建议后立即重新生成，保持灵感流动
+                    setTimeout(() => generateSuggestions(), 100);
+                  }}
+                  className="w-full bg-white border border-[#E1E8E1] hover:border-[#2D5A27]/40 p-7 rounded-[2.5rem] text-left shadow-sm hover:shadow-lg transition-all group active:scale-[0.97]"
                 >
-                  <div className={`inline-block px-2.5 py-0.5 rounded-full text-[8px] font-black uppercase tracking-tighter mb-2 ${
+                  <div className={`inline-block px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-tighter mb-3 ${
                     s.tag === 'Flow' ? 'bg-emerald-600 text-white' : s.tag === 'Dive' ? 'bg-teal-700 text-white' : 'bg-stone-600 text-white'
                   }`}>
                     {s.label}
                   </div>
-                  <p className="text-[14px] font-extrabold text-[#1A2E1A] leading-tight mb-2 group-hover:text-[#2D5A27]">{s.en}</p>
-                  <p className="text-[10px] text-[#5E7A5E] font-bold border-t border-[#F2F7F2] pt-1.5">{s.cn}</p>
+                  <p className="text-base font-extrabold text-[#1A2E1A] leading-tight mb-3 group-hover:text-[#2D5A27]">{s.en}</p>
+                  <p className="text-xs text-[#5E7A5E] font-bold border-t border-[#F2F7F2] pt-3">{s.cn}</p>
                 </button>
               ))
             ) : (
-              <p className="text-center text-[9px] text-[#5E7A5E] font-bold mt-10">灵感将在你开口后出现 ✨</p>
+              <p className="text-center text-[10px] text-[#5E7A5E] font-black mt-12 uppercase tracking-widest">正在根据对话生成新建议... ✨</p>
             )}
           </div>
         </aside>
       </div>
 
       {/* Control Area */}
-      <footer className="h-24 sm:h-36 flex items-center justify-center pointer-events-none z-50 px-8">
+      <footer className="h-32 sm:h-44 flex items-center justify-center pointer-events-none z-50 px-8">
         <div className="pointer-events-auto flex items-center gap-10">
           <button 
             onClick={toggleSession}
             disabled={isConnecting || !isOnline}
-            className={`w-20 h-20 sm:w-28 sm:h-28 rounded-full sm:rounded-[3.5rem] flex items-center justify-center text-3xl sm:text-4xl shadow-2xl transition-all relative border-4 border-[#F2F7F2] z-10 active:scale-90 hover:scale-105 ${
-              !isOnline ? 'bg-stone-300 text-stone-500 cursor-not-allowed' :
-              isSessionActive ? 'bg-[#2D5A27] text-white animate-softPulse' : 'bg-[#F8FBF8] text-[#2D5A27] border-[#E1E8E1]'
+            className={`w-24 h-24 sm:w-32 sm:h-32 rounded-full sm:rounded-[3.5rem] flex items-center justify-center text-3xl sm:text-4xl shadow-2xl transition-all relative border-4 border-[#F2F7F2] z-10 active:scale-90 hover:scale-110 ${
+              !isOnline ? 'bg-stone-300 text-stone-500 cursor-not-allowed shadow-none' :
+              isSessionActive ? 'bg-[#2D5A27] text-white animate-softPulse ring-8 ring-[#2D5A27]/10' : 'bg-white text-[#2D5A27] border-[#E1E8E1]'
             }`}
           >
             {isConnecting ? (
               <div className="loader scale-75 sm:scale-100"></div>
             ) : (
-              <i className={`fas ${!isOnline ? 'fa-wifi-slash' : isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-20'}`}></i>
+              <i className={`fas ${!isOnline ? 'fa-wifi-slash' : isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-30'}`}></i>
             )}
             
             {isAISpeaking && (
-              <div className="absolute -top-10 sm:-top-12 left-1/2 -translate-x-1/2 bg-[#2D5A27] text-white text-[8px] sm:text-[10px] px-4 sm:px-6 py-2 rounded-xl sm:rounded-2xl font-black shadow-2xl animate-bounce whitespace-nowrap">
-                VIBE 正在回复...
+              <div className="absolute -top-12 sm:-top-16 left-1/2 -translate-x-1/2 bg-[#2D5A27] text-white text-[10px] sm:text-xs px-6 sm:px-8 py-2 sm:py-3 rounded-2xl font-black shadow-2xl animate-bounce whitespace-nowrap">
+                VIBE 正在回应...
               </div>
             )}
             {isReconnecting && (
-              <div className="absolute -bottom-6 sm:-bottom-8 left-1/2 -translate-x-1/2 text-[8px] font-black text-amber-600 animate-pulse uppercase tracking-widest">
-                正在自动恢复...
+              <div className="absolute -bottom-8 sm:-bottom-10 left-1/2 -translate-x-1/2 text-[10px] font-black text-amber-600 animate-pulse uppercase tracking-widest whitespace-nowrap">
+                正在自动重连...
               </div>
             )}
           </button>
