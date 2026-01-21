@@ -32,6 +32,7 @@ declare global {
 // --- 常量配置 ---
 const LIVE_MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TRANSLATION_MODEL_NAME = 'gemini-3-flash-preview';
+const MAX_RECONNECT_ATTEMPTS = 3;
 
 // --- 辅助函数 ---
 function encode(bytes: Uint8Array) {
@@ -83,6 +84,8 @@ const App: React.FC = () => {
   const [difficulty, setDifficulty] = useState<Difficulty>('进阶');
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [globalBilingual, setGlobalBilingual] = useState(false);
   const [isAISpeaking, setIsAISpeaking] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -96,11 +99,32 @@ const App: React.FC = () => {
   const outputAudioCtxRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const reconnectCountRef = useRef(0);
   
   const currentInputText = useRef('');
   const currentOutputText = useRef('');
   const audioBufferQueue = useRef<Blob[]>([]);
   const hasTriggeredSuggestionsRef = useRef(false);
+  const userManuallyStopped = useRef(false);
+
+  // 网络状态监控
+  useEffect(() => {
+    const handleOnline = () => { setIsOnline(true); setErrorText(null); };
+    const handleOffline = () => { 
+      setIsOnline(false); 
+      setErrorText('网络连接已断开，请检查您的路由器或 VPN。');
+      if (isSessionActive) {
+        setIsSessionActive(false);
+        setIsReconnecting(true);
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [isSessionActive]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -147,7 +171,6 @@ const App: React.FC = () => {
     setIsGeneratingSuggestions(true);
     
     try {
-      // 获取当前最新的上下文，包括刚捕捉到的 transcription
       const lastContext = [
         ...messages.slice(-3),
         { role: 'user', text: currentInputText.current }
@@ -197,11 +220,22 @@ const App: React.FC = () => {
     return true;
   };
 
-  const startSession = async () => {
+  const startSession = async (autoRetry = false) => {
     if (isSessionActive || isConnecting) return;
-    setErrorText(null);
+    if (!navigator.onLine) {
+      setErrorText('您当前处于离线状态，无法启动连接。');
+      return;
+    }
+
+    if (!autoRetry) {
+      setErrorText(null);
+      userManuallyStopped.current = false;
+      reconnectCountRef.current = 0;
+    }
+
     setIsConnecting(true);
-    setStatusText('自检中...');
+    setIsReconnecting(autoRetry);
+    setStatusText(autoRetry ? '尝试重连...' : '自检中...');
 
     try {
       await ensureApiKey();
@@ -217,6 +251,8 @@ const App: React.FC = () => {
           onopen: () => {
             setIsSessionActive(true);
             setIsConnecting(false);
+            setIsReconnecting(false);
+            reconnectCountRef.current = 0;
             setStatusText('通话中');
             const source = inputAudioCtxRef.current!.createMediaStreamSource(stream);
             const scriptProcessor = inputAudioCtxRef.current!.createScriptProcessor(4096, 1, 1);
@@ -235,7 +271,6 @@ const App: React.FC = () => {
             sessionRef.current = { stopStream: () => { stream.getTracks().forEach(t => t.stop()); scriptProcessor.disconnect(); source.disconnect(); } };
           },
           onmessage: async (message: LiveServerMessage) => {
-            // 当 AI 开始产生回复或转录回复时，认为用户输入已结束，提前触发灵感生成
             if ((message.serverContent?.modelTurn || message.serverContent?.outputTranscription) && !hasTriggeredSuggestionsRef.current) {
               hasTriggeredSuggestionsRef.current = true;
               generateSuggestions();
@@ -268,14 +303,32 @@ const App: React.FC = () => {
                 if (globalBilingual) handleTranslate(id, aText);
               }
               currentInputText.current = ''; currentOutputText.current = '';
-              hasTriggeredSuggestionsRef.current = false; // 重置触发开关
+              hasTriggeredSuggestionsRef.current = false;
             }
           },
           onerror: (err: any) => {
-            setErrorText('连接失败，请检查网络或计费设置。');
-            setIsSessionActive(false); setIsConnecting(false); setStatusText('连接失败');
+            console.error("Live API Error:", err);
+            setIsSessionActive(false); 
+            setIsConnecting(false);
+            
+            if (reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS && !userManuallyStopped.current) {
+              reconnectCountRef.current++;
+              setTimeout(() => startSession(true), 2000);
+            } else {
+              setErrorText('连接异常断开，请检查网络后手动重连。');
+              setStatusText('连接失败');
+            }
           },
-          onclose: () => { setIsSessionActive(false); setStatusText('已断开'); }
+          onclose: () => { 
+            setIsSessionActive(false); 
+            if (!userManuallyStopped.current && reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS) {
+              setIsReconnecting(true);
+              reconnectCountRef.current++;
+              setTimeout(() => startSession(true), 2000);
+            } else {
+              setStatusText('会话结束');
+            }
+          }
         },
         config: {
           responseModalities: [Modality.AUDIO],
@@ -288,13 +341,16 @@ const App: React.FC = () => {
     } catch (err: any) {
       setErrorText('启动失败：' + (err.message || '未知错误'));
       setIsConnecting(false);
+      setIsReconnecting(false);
     }
   };
 
   const toggleSession = () => {
     if (isSessionActive) {
+      userManuallyStopped.current = true;
       if (sessionRef.current?.stopStream) sessionRef.current.stopStream();
       setIsSessionActive(false);
+      setStatusText('通话已结束');
     } else {
       startSession();
     }
@@ -307,8 +363,8 @@ const App: React.FC = () => {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="relative">
-              <div className="w-14 h-14 bg-[#2D5A27] rounded-2xl flex items-center justify-center text-white shadow-xl">
-                <i className="fas fa-bolt text-2xl"></i>
+              <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white shadow-xl transition-colors ${!isOnline ? 'bg-stone-400' : 'bg-[#2D5A27]'}`}>
+                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-bolt'} text-2xl`}></i>
               </div>
               {isSessionActive && <span className="absolute -top-1 -right-1 w-5 h-5 bg-emerald-500 border-4 border-[#F2F7F2] rounded-full animate-ping"></span>}
             </div>
@@ -316,12 +372,15 @@ const App: React.FC = () => {
               <h1 className="font-black text-2xl tracking-tight leading-none text-[#2D5A27]">LingoLink <span className="text-xs bg-[#2D5A27] text-white px-2 py-0.5 rounded-md ml-2">LIVE</span></h1>
               <div className="flex items-center gap-2 mt-2">
                 <span className={`w-2.5 h-2.5 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : (isConnecting ? 'bg-amber-400 animate-bounce' : 'bg-rose-400')}`}></span>
-                <p className="text-xs text-[#5E7A5E] uppercase tracking-widest font-black">{statusText}</p>
+                <p className="text-xs text-[#5E7A5E] uppercase tracking-widest font-black">
+                  {isReconnecting ? `重连中 (${reconnectCountRef.current}/${MAX_RECONNECT_ATTEMPTS})` : statusText}
+                </p>
               </div>
             </div>
           </div>
           
           <div className="flex items-center gap-4">
+            {!isOnline && <span className="text-[10px] font-black text-rose-500 bg-rose-50 px-3 py-1.5 rounded-full border border-rose-100 animate-pulse">OFFLINE</span>}
             <button onClick={() => window.aistudio.openSelectKey()} className="text-[10px] font-black px-4 py-2.5 rounded-xl bg-[#2D5A27] text-white shadow-md active:scale-95 transition-all">
               <i className="fas fa-key mr-2"></i>API 设置
             </button>
@@ -336,8 +395,8 @@ const App: React.FC = () => {
         
         {errorText && (
           <div className="bg-rose-50 border-2 border-rose-200 text-rose-800 px-6 py-4 rounded-3xl flex items-start gap-4 animate-fadeIn shadow-lg">
-            <i className="fas fa-exclamation-circle text-2xl text-rose-500 mt-0.5"></i>
-            <div className="flex-1 text-sm">{errorText}</div>
+            <i className="fas fa-exclamation-triangle text-2xl text-rose-500 mt-0.5"></i>
+            <div className="flex-1 text-sm font-medium">{errorText}</div>
             <button onClick={() => setErrorText(null)} className="text-rose-400"><i className="fas fa-times"></i></button>
           </div>
         )}
@@ -370,7 +429,7 @@ const App: React.FC = () => {
           )}
         </main>
 
-        {/* Improved Suggestions Sidebar */}
+        {/* Suggestions Sidebar */}
         <aside className="w-[360px] hidden lg:flex flex-col bg-[#EBF2EB] border-l border-[#E1E8E1] overflow-hidden shadow-xl z-20">
           <div className="p-6 border-b border-[#D1DDD1] bg-[#D1DDD1]/30 flex items-center justify-between">
             <div>
@@ -394,11 +453,10 @@ const App: React.FC = () => {
           <div className="flex-1 overflow-y-auto p-6 space-y-4 no-scrollbar">
             {!isSessionActive ? (
               <div className="h-full flex flex-col items-center justify-center text-center px-6 opacity-30">
-                <i className="fas fa-microphone-slash text-4xl mb-4"></i>
-                <p className="text-xs font-black uppercase tracking-widest">尚未连接</p>
+                <i className={`fas ${!isOnline ? 'fa-wifi-slash' : 'fa-microphone-slash'} text-4xl mb-4`}></i>
+                <p className="text-xs font-black uppercase tracking-widest">{!isOnline ? '网络已断开' : '尚未连接'}</p>
               </div>
             ) : isGeneratingSuggestions ? (
-              // 骨架屏 Skeleton Screen
               <div className="space-y-4">
                 {[1, 2, 3].map(i => (
                   <div key={i} className="bg-white/50 border border-[#E1E8E1] p-6 rounded-[2rem] space-y-3">
@@ -436,15 +494,26 @@ const App: React.FC = () => {
         <div className="pointer-events-auto flex items-center gap-10">
           <button 
             onClick={toggleSession}
-            disabled={isConnecting}
+            disabled={isConnecting || !isOnline}
             className={`w-28 h-28 rounded-[3.5rem] flex items-center justify-center text-4xl shadow-2xl transition-all relative border-4 border-[#F2F7F2] z-10 active:scale-90 hover:scale-105 ${
+              !isOnline ? 'bg-stone-300 text-stone-500 cursor-not-allowed' :
               isSessionActive ? 'bg-[#2D5A27] text-white animate-softPulse' : 'bg-[#F8FBF8] text-[#2D5A27] border-[#E1E8E1]'
             }`}
           >
-            {isConnecting ? <div className="loader"></div> : <i className={`fas ${isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-20'}`}></i>}
+            {isConnecting ? (
+              <div className="loader"></div>
+            ) : (
+              <i className={`fas ${!isOnline ? 'fa-wifi-slash' : isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-20'}`}></i>
+            )}
+            
             {isAISpeaking && (
               <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-[#2D5A27] text-white text-[10px] px-6 py-2.5 rounded-2xl font-black shadow-2xl animate-bounce whitespace-nowrap">
                 AI 正在说话...
+              </div>
+            )}
+            {isReconnecting && (
+              <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-[8px] font-black text-amber-600 animate-pulse uppercase tracking-widest">
+                Reconnecting...
               </div>
             )}
           </button>
