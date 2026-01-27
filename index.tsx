@@ -12,13 +12,6 @@ interface Message {
   isTranslating?: boolean;
 }
 
-interface Suggestion {
-  en: string;
-  cn: string;
-  tag: 'Flow' | 'Dive' | 'Safety';
-  label: string;
-}
-
 declare global {
   interface AIStudio {
     hasSelectedApiKey: () => Promise<boolean>;
@@ -30,8 +23,6 @@ declare global {
 // --- 常量配置 ---
 const LIVE_MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TRANSLATION_MODEL_NAME = 'gemini-3-flash-preview'; 
-const SUGGESTION_MODEL_NAME = 'gemini-3-flash-preview';
-const MAX_RECONNECT_ATTEMPTS = 3;
 
 // --- 辅助函数 ---
 function encode(bytes: Uint8Array) {
@@ -77,7 +68,7 @@ const App: React.FC = () => {
     {
       id: '1',
       role: 'ai',
-      text: "Yo! Ready to vibe with some English? 🚀 I'm here to talk about anything. What's on your mind today?"
+      text: "Yooo! It's Vibe in the house! 🎤 Ready to drop some knowledge or just debate why cereal is technically a soup? What's the move today, my friend?"
     }
   ]);
   const [isSessionActive, setIsSessionActive] = useState(false);
@@ -85,8 +76,7 @@ const App: React.FC = () => {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [globalBilingual, setGlobalBilingual] = useState(false);
   const [isAISpeaking, setIsAISpeaking] = useState(false);
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
-  const [statusText, setStatusText] = useState('等待开始');
+  const [statusText, setStatusText] = useState('准备就绪');
   const [errorText, setErrorText] = useState<React.ReactNode | null>(null);
   
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -99,9 +89,22 @@ const App: React.FC = () => {
   const currentInputText = useRef('');
   const currentOutputText = useRef('');
   const audioBufferQueue = useRef<Blob[]>([]);
-  const userManuallyStopped = useRef(false);
+  
+  // 使用 Ref 追踪双语开关状态，解决 Live API 回调闭包过时的问题
+  const globalBilingualRef = useRef(globalBilingual);
+  useEffect(() => {
+    globalBilingualRef.current = globalBilingual;
+    
+    // 如果开启了双语模式，检查历史消息并翻译
+    if (globalBilingual) {
+      messages.forEach(msg => {
+        if (msg.role === 'ai' && !msg.translation && !msg.isTranslating) {
+          handleTranslate(msg.id, msg.text);
+        }
+      });
+    }
+  }, [globalBilingual]);
 
-  // 初始化网络环境
   useEffect(() => {
     const handleOnline = () => { setIsOnline(true); setErrorText(null); };
     const handleOffline = () => { setIsOnline(false); setErrorText('网络已断开'); if (isSessionActive) stopSession(); };
@@ -133,7 +136,7 @@ const App: React.FC = () => {
       const hasKey = await window.aistudio.hasSelectedApiKey();
       if (!hasKey) {
         await window.aistudio.openSelectKey();
-        return true; // 假定用户完成操作
+        return true; 
       }
       return true;
     }
@@ -141,59 +144,28 @@ const App: React.FC = () => {
   };
 
   const handleTranslate = async (id: string, text: string) => {
-    if (!process.env.API_KEY) {
-      setErrorText(<span>请点击右上角钥匙图标设置 API 密钥。</span>);
-      window.aistudio?.openSelectKey();
-      return;
-    }
+    const aiKey = process.env.API_KEY;
+    if (!aiKey) return;
+    
     setMessages(prev => prev.map(m => m.id === id ? { ...m, isTranslating: true } : m));
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: aiKey });
       const response = await ai.models.generateContent({
         model: TRANSLATION_MODEL_NAME,
-        contents: `Translate to natural casual Chinese: "${text}"`,
-        config: { systemInstruction: "Direct translation only.", temperature: 0.1 }
+        contents: `Translate to very natural, expressive, and slightly cool Chinese (avoid robotic textbook translations): "${text}"`,
+        config: { systemInstruction: "Output ONLY the cool translation.", temperature: 0.1 }
       });
-      setMessages(prev => prev.map(m => m.id === id ? { ...m, translation: response.text?.trim(), isTranslating: false } : m));
+      const result = response.text?.trim();
+      setMessages(prev => prev.map(m => m.id === id ? { ...m, translation: result, isTranslating: false } : m));
     } catch (err: any) {
-      if (err.message?.includes('API_KEY')) window.aistudio?.openSelectKey();
+      console.error("Translation failed", err);
       setMessages(prev => prev.map(m => m.id === id ? { ...m, isTranslating: false } : m));
     }
-  };
-
-  const generateSuggestions = async () => {
-    if (!process.env.API_KEY || !isSessionActive) return;
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: SUGGESTION_MODEL_NAME,
-        contents: `Recent messages:\n${messages.slice(-3).map(m=>m.text).join('\n')}\nSuggest 3 casual next steps.`,
-        config: { 
-          systemInstruction: "Expert English coach. JSON only.",
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                tag: { type: Type.STRING },
-                label: { type: Type.STRING },
-                en: { type: Type.STRING },
-                cn: { type: Type.STRING }
-              },
-              required: ["tag", "label", "en", "cn"]
-            }
-          }
-        }
-      });
-      setSuggestions(JSON.parse(response.text || "[]"));
-    } catch (e) { console.error(e); }
   };
 
   const startSession = async () => {
     if (isSessionActive || isConnecting) return;
 
-    // 关键：在点击瞬间初始化并恢复 AudioContext，否则移动端会无声/无法录音
     if (!inputAudioCtxRef.current) inputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     if (!outputAudioCtxRef.current) outputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     
@@ -202,14 +174,15 @@ const App: React.FC = () => {
 
     setIsConnecting(true);
     setErrorText(null);
-    setStatusText('正在初始化...');
+    setStatusText('正在召唤 Vibe...');
 
     try {
       const keyReady = await checkApiKey();
-      if (!keyReady) throw new Error("请设置 API 密钥以继续");
+      const currentApiKey = process.env.API_KEY;
+      if (!currentApiKey) throw new Error("请设置 API 密钥以继续");
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: currentApiKey });
       
       const sessionPromise = ai.live.connect({
         model: LIVE_MODEL_NAME,
@@ -217,7 +190,7 @@ const App: React.FC = () => {
           onopen: () => {
             setIsSessionActive(true);
             setIsConnecting(false);
-            setStatusText('通话中');
+            setStatusText('正在热聊中');
             const source = inputAudioCtxRef.current!.createMediaStreamSource(stream);
             const scriptProcessor = inputAudioCtxRef.current!.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
@@ -257,17 +230,18 @@ const App: React.FC = () => {
               if (aText) {
                 const id = `a-${Date.now()}`;
                 setMessages(prev => [...prev, { id, role: 'ai', text: aText }]);
-                if (globalBilingual) setTimeout(() => handleTranslate(id, aText), 100);
+                // 这里使用 Ref 确保即便在长时间通话中也能获取最新的双语开关状态
+                if (globalBilingualRef.current) {
+                  handleTranslate(id, aText);
+                }
               }
               currentInputText.current = ''; currentOutputText.current = '';
-              generateSuggestions();
             }
           },
           onerror: (err: any) => {
             console.error(err);
             if (err.message?.includes('entity was not found') || err.message?.includes('API_KEY')) {
-              setErrorText(<span>API 密钥无效或未开启计费。 <button onClick={() => window.aistudio?.openSelectKey()} className="font-bold underline">点此重选</button></span>);
-              window.aistudio?.openSelectKey();
+              setErrorText(<span>API 密钥无效或未开启计费。 <button onClick={() => window.aistudio?.openSelectKey()} className="font-bold underline">重选密钥</button></span>);
             }
             stopSession();
           },
@@ -275,7 +249,11 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: "You are 'Vibe', a charismatic English coach. Keep it fun.",
+          systemInstruction: `You are 'Vibe', a charismatic, witty, and high-energy English coach. 
+          Personality: DJ meets best friend. Adventuresome, sassy, 'main character energy'. 
+          Speech Style: Contemporary English. Use idioms and slang naturally.
+          Engagement: Long, interesting answers. Always follow up with a great question.
+          Correction Style: If the user makes a mistake, model the correct version naturally in your next sentence.`,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
           inputAudioTranscription: {},
           outputAudioTranscription: {}
@@ -288,96 +266,135 @@ const App: React.FC = () => {
   };
 
   const stopSession = () => {
-    userManuallyStopped.current = true;
     if (sessionRef.current) sessionRef.current.stop();
     setIsSessionActive(false);
     setIsConnecting(false);
-    setStatusText('通话已结束');
+    setStatusText('下次见！');
   };
 
   return (
-    <div className="flex flex-col h-screen max-w-[1200px] mx-auto bg-[#F2F7F2] text-[#1A2E1A] relative overflow-hidden font-sans border-x border-[#E1E8E1] shadow-2xl">
-      <header className="glass-header px-4 sm:px-10 py-4 sm:py-6 flex flex-col gap-4 sticky top-0 z-50 border-b border-[#E1E8E1]">
+    <div className="flex flex-col h-screen max-w-[1200px] mx-auto relative overflow-hidden font-sans border-x border-[#E1E8E1] shadow-2xl">
+      <header className="glass-header px-4 sm:px-12 py-5 flex flex-col gap-4 sticky top-0 z-50">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3 sm:gap-5">
-            <div className={`w-10 h-10 sm:w-12 sm:h-12 rounded-2xl flex items-center justify-center text-white shadow-lg transition-all ${isSessionActive ? 'bg-[#2D5A27] scale-110' : 'bg-stone-400'}`}>
-              <i className="fas fa-bolt"></i>
+          <div className="flex items-center gap-4 sm:gap-6">
+            <div className={`relative w-12 h-12 rounded-2xl flex items-center justify-center text-white shadow-lg transition-all duration-500 ${isSessionActive ? 'bg-[#2D5A27] scale-110 shadow-[#2D5A27]/20 rotate-12' : 'bg-stone-300'}`}>
+              <i className="fas fa-bolt text-xl"></i>
+              {isSessionActive && <div className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-400 rounded-full border-2 border-white animate-pulse"></div>}
             </div>
             <div className="flex flex-col">
-              <h1 className="font-black text-lg sm:text-xl text-[#2D5A27]">LingoLink</h1>
-              <p className="text-[9px] text-[#5E7A5E] uppercase tracking-widest font-black">{statusText}</p>
+              <h1 className="font-heading font-bold text-xl sm:text-2xl text-[#1A2E1A] tracking-tight">LingoLink</h1>
+              <div className="flex items-center gap-2 mt-0.5">
+                 <span className={`w-1.5 h-1.5 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`}></span>
+                 <p className="text-[10px] text-[#5E7A5E] uppercase tracking-widest font-bold leading-none">{statusText}</p>
+              </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 sm:gap-4">
+          
+          <div className="flex items-center gap-3">
             <button 
               onClick={() => window.aistudio?.openSelectKey()} 
-              className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${!process.env.API_KEY ? 'bg-rose-100 text-rose-600 animate-pulse border-2 border-rose-300' : 'bg-white text-[#2D5A27] border border-[#E1E8E1]'}`}
-              title="设置 API Key"
+              className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${!process.env.API_KEY ? 'bg-rose-50 text-rose-500 border border-rose-200 animate-bounce' : 'bg-white text-[#2D5A27] border border-stone-200 hover:border-[#2D5A27] hover:shadow-md'}`}
+              title="API Key"
             >
               <i className="fas fa-key"></i>
             </button>
-            <label className="flex items-center gap-2 bg-white px-2 sm:px-3 py-1.5 rounded-xl border border-[#E1E8E1] shadow-sm cursor-pointer">
-              <span className="text-[9px] font-black uppercase">双语</span>
-              <div onClick={() => setGlobalBilingual(!globalBilingual)} className={`w-8 h-5 sm:w-10 sm:h-6 rounded-full p-1 transition-colors ${globalBilingual ? 'bg-[#2D5A27]' : 'bg-[#D1DDD1]'}`}>
-                <div className={`w-3 h-3 sm:w-4 sm:h-4 bg-white rounded-full shadow transform transition-transform ${globalBilingual ? 'translate-x-3 sm:translate-x-4' : 'translate-x-0'}`}></div>
-              </div>
-            </label>
+            <div className="flex items-center bg-white/50 backdrop-blur-sm p-1 rounded-xl border border-stone-200">
+               <button 
+                 onClick={() => setGlobalBilingual(!globalBilingual)}
+                 className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2 ${globalBilingual ? 'bg-[#2D5A27] text-white shadow-sm' : 'text-[#5E7A5E] hover:bg-stone-100'}`}
+               >
+                 <i className="fas fa-language text-xs"></i>
+                 <span>双语通话</span>
+               </button>
+            </div>
           </div>
         </div>
+        
         {errorText && (
-          <div className="bg-rose-50 border border-rose-100 text-rose-800 px-4 py-3 rounded-xl flex items-start gap-3 animate-fadeIn text-xs font-bold">
-            <i className="fas fa-exclamation-circle mt-0.5"></i>
+          <div className="bg-rose-50 border border-rose-100 text-rose-800 px-4 py-3 rounded-2xl flex items-center gap-3 animate-fadeIn text-xs font-semibold shadow-sm">
+            <i className="fas fa-circle-exclamation text-rose-400 text-base"></i>
             <div className="flex-1">{errorText}</div>
-            <button onClick={() => setErrorText(null)} className="text-rose-400"><i className="fas fa-times"></i></button>
+            <button onClick={() => setErrorText(null)} className="opacity-40 hover:opacity-100"><i className="fas fa-xmark"></i></button>
           </div>
         )}
       </header>
 
       <div className="flex flex-1 overflow-hidden relative">
-        <main ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-12 py-6 space-y-6 chat-area no-scrollbar pb-36">
+        <main ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-16 py-10 space-y-8 chat-area-mask no-scrollbar pb-40">
           {messages.map((msg) => (
-            <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start animate-fadeIn'}`}>
-              <div className={`message-bubble p-4 sm:p-7 rounded-[1.5rem] sm:rounded-[2rem] shadow-sm ${msg.role === 'user' ? 'user-bubble' : 'ai-bubble'}`}>
-                <p className="font-semibold text-sm sm:text-base leading-relaxed">{msg.text}</p>
-                {msg.role === 'ai' && !msg.translation && !msg.isTranslating && !globalBilingual && (
-                  <button onClick={() => handleTranslate(msg.id, msg.text)} className="mt-2 text-[10px] font-black uppercase text-[#2D5A27] opacity-60"><i className="fas fa-language"></i> 翻译</button>
+            <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+              <div className={`message-bubble p-5 sm:p-8 rounded-[2rem] ${msg.role === 'user' ? 'user-bubble' : 'ai-bubble'} relative`}>
+                {msg.role === 'ai' && (
+                  <div className="absolute -top-3 left-6 px-3 py-1 bg-[#2D5A27] text-white text-[9px] font-black uppercase rounded-full shadow-sm tracking-widest">Vibe</div>
                 )}
+                <p className="text-[15px] sm:text-[17px] leading-relaxed font-medium tracking-tight whitespace-pre-wrap">{msg.text}</p>
+                
+                {msg.role === 'ai' && !msg.translation && !msg.isTranslating && !globalBilingual && (
+                  <button 
+                    onClick={() => handleTranslate(msg.id, msg.text)} 
+                    className="mt-4 flex items-center gap-2 text-[11px] font-bold text-[#2D5A27] opacity-50 hover:opacity-100 transition-opacity"
+                  >
+                    <i className="fas fa-wand-magic-sparkles"></i>
+                    地道意译
+                  </button>
+                )}
+                
                 {(msg.translation || msg.isTranslating) && (
-                   <div className="mt-3 pt-3 border-t border-[#D1DDD1] text-[13px] sm:text-base text-[#5E7A5E] italic">
-                     {msg.isTranslating ? <span className="animate-pulse">翻译中...</span> : msg.translation}
+                   <div className="mt-4 pt-4 border-t border-stone-100/50 text-[14px] sm:text-[15px] text-[#5E7A5E] italic leading-snug">
+                     {msg.isTranslating ? (
+                       <div className="flex items-center gap-2 opacity-60">
+                         <div className="loader !w-4 !h-4 !border-2"></div>
+                         <span>思考地道表达...</span>
+                       </div>
+                     ) : msg.translation}
                    </div>
                 )}
               </div>
             </div>
           ))}
-          {isAISpeaking && <div className="ml-6 flex gap-1 p-2 bg-white rounded-xl shadow-sm border border-[#E1E8E1] w-fit"><span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce"></span><span className="w-1.5 h-1.5 bg-[#2D5A27] rounded-full animate-bounce [animation-delay:0.2s]"></span></div>}
+          
+          {isAISpeaking && (
+            <div className="ml-8 flex items-center gap-4 p-4 bg-white/60 backdrop-blur rounded-full border border-stone-200/50 w-fit animate-fadeIn">
+              <div className="voice-wave">
+                <span style={{ animationDelay: '0s' }}></span>
+                <span style={{ animationDelay: '0.1s' }}></span>
+                <span style={{ animationDelay: '0.2s' }}></span>
+                <span style={{ animationDelay: '0.3s' }}></span>
+                <span style={{ animationDelay: '0.4s' }}></span>
+              </div>
+              <span className="text-[10px] font-black uppercase tracking-widest text-[#2D5A27]">Vibe Speaking...</span>
+            </div>
+          )}
         </main>
-
-        <aside className="w-[280px] hidden lg:flex flex-col bg-[#EBF2EB] border-l border-[#E1E8E1] p-6">
-          <h2 className="text-[10px] font-black text-[#2D5A27] uppercase tracking-widest mb-6">推荐回复</h2>
-          <div className="space-y-4 overflow-y-auto no-scrollbar">
-            {suggestions.length === 0 ? (
-              <div className="text-center opacity-30 mt-10"><i className="fas fa-lightbulb text-3xl mb-3"></i><p className="text-[9px] font-black uppercase">对话开始后显示灵感</p></div>
-            ) : suggestions.map((s, idx) => (
-              <button key={idx} onClick={() => setMessages(prev => [...prev, { id: `u-${Date.now()}`, role: 'user', text: s.en }])} className="w-full bg-white border border-[#E1E8E1] p-4 rounded-[1.2rem] text-left shadow-sm hover:shadow-md transition-all active:scale-95">
-                <p className="text-sm font-bold mb-1">{s.en}</p>
-                <p className="text-[10px] text-[#5E7A5E]">{s.cn}</p>
-              </button>
-            ))}
-          </div>
-        </aside>
       </div>
 
-      <footer className="absolute bottom-4 left-0 right-0 flex items-center justify-center pointer-events-none z-50">
-        <button 
-          onClick={isSessionActive ? stopSession : startSession} 
-          disabled={isConnecting || !isOnline}
-          className={`pointer-events-auto w-20 h-20 sm:w-24 sm:h-24 rounded-full flex items-center justify-center text-2xl sm:text-3xl shadow-2xl transition-all relative z-10 active:scale-90 ${
-            isSessionActive ? 'bg-[#2D5A27] text-white ring-8 ring-[#2D5A27]/10' : 'bg-white text-[#2D5A27] border-4 border-[#2D5A27]'
-          }`}
-        >
-          {isConnecting ? <div className="loader"></div> : <i className={`fas ${isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-40'}`}></i>}
-        </button>
+      <footer className="absolute bottom-10 left-0 right-0 flex flex-col items-center justify-center pointer-events-none z-50">
+        <div className="relative group">
+          {isSessionActive && (
+             <>
+               <div className="absolute inset-0 bg-[#2D5A27]/20 rounded-full blur-2xl animate-pulse"></div>
+               <div className="absolute inset-0 rounded-full border-2 border-[#2D5A27]/20 mic-active-ring pointer-events-none"></div>
+             </>
+          )}
+          
+          <button 
+            onClick={isSessionActive ? stopSession : startSession} 
+            disabled={isConnecting || !isOnline}
+            className={`pointer-events-auto w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center text-3xl sm:text-4xl shadow-2xl transition-all duration-500 relative z-10 active:scale-90 group-hover:scale-105 ${
+              isSessionActive ? 'bg-[#2D5A27] text-white' : 'bg-white text-[#2D5A27] border-2 border-stone-100'
+            }`}
+          >
+            {isConnecting ? (
+              <div className="loader !w-10 !h-10 !border-[4px]"></div>
+            ) : (
+              <i className={`fas ${isSessionActive ? 'fa-microphone' : 'fa-microphone-slash opacity-40'} transition-transform duration-500 ${isSessionActive ? 'scale-110' : ''}`}></i>
+            )}
+          </button>
+        </div>
+        
+        <p className={`mt-6 text-[10px] font-black uppercase tracking-[0.3em] transition-all duration-700 ${isSessionActive ? 'opacity-40 translate-y-0' : 'opacity-0 translate-y-4'}`}>
+          Say something, keep it flowin'
+        </p>
       </footer>
     </div>
   );
